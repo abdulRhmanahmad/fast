@@ -177,7 +177,8 @@ async def chat(req: MessageRequest):
         all_msgs = [{"role": "system", "content": system_prompt}] + messages
 
         completion = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-3.5-turbo",
+
             temperature=0.3,
             max_tokens=300,
             messages=all_msgs
