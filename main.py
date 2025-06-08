@@ -1,4 +1,4 @@
-import os, json, asyncio, re, requests
+import os, json, asyncio, re
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
 from openai import OpenAI
 import logging
+import aiohttp
 
 # إعداد التسجيل
 logging.basicConfig(level=logging.INFO)
@@ -138,27 +139,25 @@ async def get_location_name(lat: float, lng: float) -> Optional[str]:
             "result_type": "locality|sublocality|administrative_area_level_2"
         }
         
-        async with asyncio.timeout(10):
-            response = requests.get(base_url, params=params, timeout=8)
-            response.raise_for_status()
-            
-        data = response.json()
-        
-        if data.get("status") == "OK" and data.get("results"):
-            # البحث عن أفضل نتيجة (المدينة أو الحي)
-            for result in data["results"]:
-                for component in result.get("address_components", []):
-                    types = component.get("types", [])
-                    if any(t in ["locality", "sublocality", "administrative_area_level_2"] for t in types):
-                        return component.get("long_name", "")
-            
-            # إذا لم نجد اسم محدد، نأخذ أول عنوان
-            if data["results"][0].get("formatted_address"):
-                address = data["results"][0]["formatted_address"]
-                # استخراج الجزء الأول من العنوان
-                parts = address.split(",")
-                if len(parts) > 1:
-                    return parts[1].strip()  # عادة المدينة تكون في الجزء الثاني
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base_url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                data = await response.json()
+                
+                if data.get("status") == "OK" and data.get("results"):
+                    # البحث عن أفضل نتيجة (المدينة أو الحي)
+                    for result in data["results"]:
+                        for component in result.get("address_components", []):
+                            types = component.get("types", [])
+                            if any(t in ["locality", "sublocality", "administrative_area_level_2"] for t in types):
+                                return component.get("long_name", "")
+                    
+                    # إذا لم نجد اسم محدد، نأخذ أول عنوان
+                    if data["results"][0].get("formatted_address"):
+                        address = data["results"][0]["formatted_address"]
+                        # استخراج الجزء الأول من العنوان
+                        parts = address.split(",")
+                        if len(parts) > 1:
+                            return parts[1].strip()  # عادة المدينة تكون في الجزء الثاني
                 
     except Exception as e:
         logger.error(f"Reverse geocoding error: {e}")
@@ -185,29 +184,25 @@ async def find_nearest_place(place: str, lat: Optional[float] = None, lng: Optio
             params["location"] = f"{lat},{lng}"
             params["radius"] = 50000  # زيادة نصف القطر إلى 50 كم
         
-        async with asyncio.timeout(10):  # timeout لتجنب التعليق
-            response = requests.get(base_url, params=params, timeout=8)
-            response.raise_for_status()
-            
-        data = response.json()
-        
-        if data.get("status") == "OK" and data.get("results"):
-            result = data["results"][0]
-            return {
-                "exists": True,
-                "name": result.get("name", place),
-                "address": result.get("formatted_address", ""),
-                "lat": result["geometry"]["location"]["lat"],
-                "lng": result["geometry"]["location"]["lng"],
-                "place_id": result.get("place_id", "")
-            }
-        else:
-            logger.warning(f"Places API returned: {data.get('status', 'Unknown error')}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base_url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                data = await response.json()
+                
+                if data.get("status") == "OK" and data.get("results"):
+                    result = data["results"][0]
+                    return {
+                        "exists": True,
+                        "name": result.get("name", place),
+                        "address": result.get("formatted_address", ""),
+                        "lat": result["geometry"]["location"]["lat"],
+                        "lng": result["geometry"]["location"]["lng"],
+                        "place_id": result.get("place_id", "")
+                    }
+                else:
+                    logger.warning(f"Places API returned: {data.get('status', 'Unknown error')}")
             
     except asyncio.TimeoutError:
         logger.error("Google Places API timeout")
-    except requests.RequestException as e:
-        logger.error(f"Places API request error: {e}")
     except Exception as e:
         logger.error(f"Unexpected error in find_nearest_place: {e}")
     
@@ -241,10 +236,12 @@ system_prompt_base = """
 - إنجليزي: "Hello! I'm Yaho, your smart ride assistant. Where would you like to go today? 🚖"
 
 ## أمثلة على الأسئلة:
-- "من أين تود الانطلاق؟ من موقعك الحالي أم من مكان آخر؟"
+- "من أين تود الانطلاق؟ من موقعك الحالي ([اسم الموقع الحالي]) أم من مكان آخر؟"
 - "متى تود الانطلاق؟ الآن أم في وقت محدد؟"
 - "أي نوع سيارة تفضل؟ عادية أم VIP؟"
 - "هل تود الاستماع لشيء أثناء الرحلة؟"
+
+ملاحظة مهمة: عندما تسأل عن نقطة الانطلاق، استخدم اسم الموقع الحالي الفعلي بدلاً من "موقعك الحالي" العام.
 
 ## التأكيد النهائي:
 عند اكتمال المعلومات، اعرض ملخصاً كاملاً واطلب التأكيد:
