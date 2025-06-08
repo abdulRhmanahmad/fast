@@ -6,12 +6,10 @@ from openai import OpenAI
 
 app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
-
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 BOOKINGS_FILE = "bookings.json"
 file_lock = asyncio.Lock()
 
-# === كشف اللغة ===
 def detect_language(text: str) -> str:
     text_clean = text.strip().lower()
     arabic_words = len(re.findall(r'[\u0600-\u06FF]+', text))
@@ -36,6 +34,18 @@ def get_response_templates(language: str) -> dict:
         return {'greeting': "Hello! Where would you like to go today? 🚖"}
     else:
         return {'greeting': "مرحباً! أين تود الذهاب اليوم؟ 🚖"}
+
+# ========== تحقق من الموقع ==========
+def check_place_exists(place: str) -> bool:
+    api_key = GOOGLE_MAPS_API_KEY
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={place}&key={api_key}"
+    try:
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+        return bool(data.get("results"))
+    except Exception as e:
+        print("Geocoding error:", e)
+        return False
 
 system_prompt_base = """
 أنت مساعد صوتي اسمي "يا هو" داخل تطبيق تاكسي، تتكلم بالفصحى إذا كان المستخدم بالعربية، وتتكلم بالإنجليزية إذا كان المستخدم بالإنجليزية.
@@ -72,7 +82,6 @@ class MessageRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     response: str
-
 
 def extract_last_qa(messages: list[dict]) -> tuple[str, str]:
     for i in reversed(range(len(messages))):
@@ -144,6 +153,23 @@ async def chat(req: MessageRequest):
         lang = detect_language(last_user_msg)
         greeting = get_response_templates(lang)['greeting']
 
+        # 🚨 تحقق إذا المستخدم ذكر مكان (مكان استلام أو وجهة) قبل متابعة GPT
+        # ابحث عن اسم مكان واضح في آخر رسالة
+        place_keywords = ["من", "الى", "إلى", "to", "from", "destination", "pickup", "الوجهة", "مكان"]
+        place_detected = any(k in last_user_msg.lower() for k in place_keywords)
+        place_name = last_user_msg.strip()
+        # تحقق إذا فيه جملة مثل: "من [مكان]"
+        # إذا بدك تدقق أكثر استخدم regex أو معالجة متقدمة حسب مشروعك
+
+        if place_detected and len(place_name) > 2:
+            if not check_place_exists(place_name):
+                msg = (
+                    "الموقع المدخل غير موجود على الخريطة. جرب تكتب اسم المكان بشكل أوضح."
+                    if lang == "arabic"
+                    else "The entered location could not be found on the map. Please try a clearer name."
+                )
+                return MessageResponse(response=msg)
+
         system_prompt = system_prompt_base
         if len(messages) <= 1:
             system_prompt += f"\n\nابدأ المحادثة بـ: {greeting}"
@@ -210,7 +236,7 @@ async def get_booking_status(booking_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
