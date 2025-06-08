@@ -35,17 +35,33 @@ def get_response_templates(language: str) -> dict:
     else:
         return {'greeting': "مرحباً! أين تود الذهاب اليوم؟ 🚖"}
 
-# ========== تحقق من الموقع ==========
-def check_place_exists(place: str) -> bool:
+# ========== تحقق متقدم من الموقع (يدعم القرب الجغرافي) ==========
+def find_nearest_place(place: str, lat=None, lng=None) -> dict:
+    """ ابحث عن أقرب مكان (إذا كان الاسم عام) بناءً على موقع المستخدم """
     api_key = GOOGLE_MAPS_API_KEY
-    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={place}&key={api_key}"
+    base_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {"query": place, "key": api_key}
+    if lat and lng:
+        params["location"] = f"{lat},{lng}"
+        params["radius"] = 30000  # نصف قطر 30 كم مثلاً
     try:
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(base_url, params=params, timeout=5)
         data = resp.json()
-        return bool(data.get("results"))
+        if data.get("results"):
+            result = data["results"][0]
+            return {
+                "exists": True,
+                "name": result["name"],
+                "address": result.get("formatted_address", ""),
+                "lat": result["geometry"]["location"]["lat"],
+                "lng": result["geometry"]["location"]["lng"],
+            }
     except Exception as e:
-        print("Geocoding error:", e)
-        return False
+        print("Places API error:", e)
+    return {"exists": False}
+
+def get_google_maps_link(lat, lng):
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
 
 system_prompt_base = """
 أنت مساعد صوتي اسمي "يا هو" داخل تطبيق تاكسي، تتكلم بالفصحى إذا كان المستخدم بالعربية، وتتكلم بالإنجليزية إذا كان المستخدم بالإنجليزية.
@@ -79,6 +95,8 @@ class ChatMessage(BaseModel):
 class MessageRequest(BaseModel):
     user_id: str
     messages: list[ChatMessage]
+    lat: float | None = None
+    lng: float | None = None
 
 class MessageResponse(BaseModel):
     response: str
@@ -110,10 +128,6 @@ def parse_summary(text: str) -> dict:
         "music": grab("الأغاني") or grab("الموسيقا"),
         "notes": grab("ملاحظات") or grab("طلبات خاصة")
     }
-
-def get_google_maps_link(destination: str) -> str:
-    dest_encoded = destination.replace(" ", "+")
-    return f"https://www.google.com/maps/search/?api=1&query={dest_encoded}"
 
 async def save_booking(data: dict) -> str | None:
     async with file_lock:
@@ -153,20 +167,21 @@ async def chat(req: MessageRequest):
         lang = detect_language(last_user_msg)
         greeting = get_response_templates(lang)['greeting']
 
-        # 🚨 تحقق إذا المستخدم ذكر مكان (مكان استلام أو وجهة) قبل متابعة GPT
-        # ابحث عن اسم مكان واضح في آخر رسالة
-        place_keywords = ["من", "الى", "إلى", "to", "from", "destination", "pickup", "الوجهة", "مكان"]
+        # 🚨 التحقق من الأماكن مع دعم الموقع الحالي
+        place_keywords = ["من", "الى", "إلى", "to", "from", "destination", "pickup", "الوجهة", "مكان", "location", "الموقع", "الكورنيش"]
         place_detected = any(k in last_user_msg.lower() for k in place_keywords)
         place_name = last_user_msg.strip()
-        # تحقق إذا فيه جملة مثل: "من [مكان]"
-        # إذا بدك تدقق أكثر استخدم regex أو معالجة متقدمة حسب مشروعك
+        lat = getattr(req, "lat", None)
+        lng = getattr(req, "lng", None)
+        place_info = {"exists": True}
 
         if place_detected and len(place_name) > 2:
-            if not check_place_exists(place_name):
+            place_info = find_nearest_place(place_name, lat, lng)
+            if not place_info["exists"]:
                 msg = (
-                    "الموقع المدخل غير موجود على الخريطة. جرب تكتب اسم المكان بشكل أوضح."
+                    "الموقع المدخل غير موجود أو غير واضح على الخريطة. حاول كتابة اسم المكان بدقة أو فعّل الموقع الجغرافي."
                     if lang == "arabic"
-                    else "The entered location could not be found on the map. Please try a clearer name."
+                    else "The entered location could not be found on the map. Please try a clearer name or enable location."
                 )
                 return MessageResponse(response=msg)
 
@@ -187,7 +202,7 @@ async def chat(req: MessageRequest):
         completion = client.chat.completions.create(
             model="gpt-3.5-turbo",
             temperature=0.3,
-            max_tokens=300,
+            max_tokens=350,
             messages=all_msgs
         )
         reply = completion.choices[0].message.content
@@ -201,10 +216,8 @@ async def chat(req: MessageRequest):
                     reply += f"\n\n📱 رقم حجزك: {booking_id}"
 
         # 🔗 أضف رابط Google Maps إذا تم تحديد الوجهة
-        dest_match = re.search(r"(?:الوجهة|destination):\s*(.+)", reply, re.IGNORECASE)
-        if dest_match:
-            location = dest_match.group(1).strip()
-            maps_link = get_google_maps_link(location)
+        if place_info["exists"] and "lat" in place_info:
+            maps_link = get_google_maps_link(place_info["lat"], place_info["lng"])
             reply += f"\n\n🗺️ يمكنك رؤية الموقع على الخريطة:\n{maps_link}"
 
         return MessageResponse(response=reply)
@@ -236,7 +249,7 @@ async def get_booking_status(booking_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
