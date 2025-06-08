@@ -123,6 +123,48 @@ def get_response_templates(language: str) -> Dict[str, str]:
             'processing_error': "عذراً، حدث خطأ في معالجة طلبك. يرجى المحاولة مرة أخرى."
         }
 
+# وظيفة Reverse Geocoding لتحويل الإحداثيات لاسم المكان
+async def get_location_name(lat: float, lng: float) -> Optional[str]:
+    """تحويل الإحداثيات إلى اسم المكان"""
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+    
+    try:
+        base_url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {
+            "latlng": f"{lat},{lng}",
+            "key": GOOGLE_MAPS_API_KEY,
+            "language": "ar",  # تفضيل اللغة العربية
+            "result_type": "locality|sublocality|administrative_area_level_2"
+        }
+        
+        async with asyncio.timeout(10):
+            response = requests.get(base_url, params=params, timeout=8)
+            response.raise_for_status()
+            
+        data = response.json()
+        
+        if data.get("status") == "OK" and data.get("results"):
+            # البحث عن أفضل نتيجة (المدينة أو الحي)
+            for result in data["results"]:
+                for component in result.get("address_components", []):
+                    types = component.get("types", [])
+                    if any(t in ["locality", "sublocality", "administrative_area_level_2"] for t in types):
+                        return component.get("long_name", "")
+            
+            # إذا لم نجد اسم محدد، نأخذ أول عنوان
+            if data["results"][0].get("formatted_address"):
+                address = data["results"][0]["formatted_address"]
+                # استخراج الجزء الأول من العنوان
+                parts = address.split(",")
+                if len(parts) > 1:
+                    return parts[1].strip()  # عادة المدينة تكون في الجزء الثاني
+                
+    except Exception as e:
+        logger.error(f"Reverse geocoding error: {e}")
+    
+    return None
+
 # تحسين وظيفة البحث عن الأماكن
 async def find_nearest_place(place: str, lat: Optional[float] = None, lng: Optional[float] = None) -> Dict[str, Any]:
     """البحث عن أقرب مكان مع معالجة أفضل للأخطاء"""
@@ -314,6 +356,11 @@ async def chat_endpoint(request: MessageRequest, background_tasks: BackgroundTas
         language = detect_language(last_user_message)
         templates = get_response_templates(language)
         
+        # الحصول على اسم الموقع الحالي إذا توفرت الإحداثيات
+        current_location_name = None
+        if request.lat and request.lng:
+            current_location_name = await get_location_name(request.lat, request.lng)
+        
         # التحقق من الأماكن إذا لزم الأمر
         place_keywords = ["من", "الى", "إلى", "to", "from", "destination", "pickup", "الوجهة", "مكان", "location"]
         needs_place_verification = any(keyword in last_user_message.lower() for keyword in place_keywords)
@@ -346,6 +393,12 @@ async def chat_endpoint(request: MessageRequest, background_tasks: BackgroundTas
         system_message += f"\n\nلغة المستخدم: {'عربية' if language == 'arabic' else 'English'}"
         system_message += f"\nمعرف المستخدم: {request.user_id}"
         system_message += f"\nالوقت: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        
+        # إضافة معلومات الموقع الحالي إذا كانت متوفرة
+        if current_location_name:
+            location_info = f"\nالموقع الحالي للمستخدم: {current_location_name}" if language == 'arabic' else f"\nUser's current location: {current_location_name}"
+            system_message += location_info
+            system_message += f"\n\nعندما تسأل عن نقطة الانطلاق، اذكر الموقع الحالي بالاسم: 'من موقعك الحالي ({current_location_name}) أم من مكان آخر؟'"
         
         # إعداد الرسائل للنموذج
         model_messages = [{"role": "system", "content": system_message}] + messages
