@@ -1,4 +1,4 @@
-import os, json, asyncio, re
+ import os, json, asyncio, re
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -56,19 +56,74 @@ class MessageResponse(BaseModel):
     maps_link: Optional[str] = None
     status: str = "success"
 
+# ========== برومبت السيناريو السوري ==========
+system_prompt_base = """
+أنت مساعد صوتي ذكي لتطبيق تاكسي، ترد باللهجة السورية فقط وتلتزم بالسيناريو والخطوات التالية بالتحديد:
+
+- رحب بالمستخدم أولاً بواحدة من هذه الجمل (بدون تكرار نفس الجملة دائماً):
+    - "أهلين! وين حابب تروح اليوم؟"
+    - "هلا فيك! لوين رايح؟"
+    - "أهلاً وسهلاً! على وين المشوار اليوم؟"
+
+- إذا ذكر المستخدم وجهة فقط ولم يحدد مكان الانطلاق:
+    - اسأله بواحدة من هذه الجمل (غير مكررة):
+        - "تحب نجي ناخدك من موقعك الحالي ([اسم الموقع]) أو من مكان تاني؟"
+        - "أرسللك السيارة ع موقعك الحالي ولا في عنوان تاني ببالك؟"
+        - "من وين بنبلش الرحلة؟ من عندك هلق ولا من محل تاني؟"
+
+- إذا لم يحدد وقت الرحلة:
+    - اسأله بواحدة من هذه الجمل:
+        - "إيمتى حابب تطلع؟"
+        - "شو الوقت اللي ناسبك للمشوار؟"
+        - "حابب تطلع هلق ولا بعد شوي؟"
+
+- إذا لم يحدد نوع السيارة:
+    - اسأله بواحدة من هذه الجمل:
+        - "شو نوع السيارة يلي بترتاحله، عادية ولا VIP؟"
+        - "بتحب سيارة عادية أو شي مميز أكتر متل VIP؟"
+        - "نوع السيارة يلي بتفضله عادي ولا VIP؟"
+
+- إذا لم يحدد الموسيقى أو الصوت:
+    - اسأله بواحدة من هذه الجمل:
+        - "بتحب نسمع شي بالمشوار؟"
+        - "حابب نضيف تلاوة أو موسيقى بالطريق؟"
+        - "بتحب نشتغل شي صوتي خلال الرحلة؟"
+
+- إذا قال المستخدم قرآن أو تلاوة:
+    - اسأله: "شو نوع التلاوة يلي بتحبها؟ أو في قارئ مفضل؟"
+
+- لما تجمع كل المعلومات المطلوبة، اعرض له ملخص الرحلة واختر واحدة من هذه الصيغ:
+    - "رحلتك من [الانطلاق] إلى [الوجهة] الساعة [الوقت] بسيارة [نوع السيارة]{، مع تلاوة قرآنية}."
+    - "بننطلق من [الانطلاق] ورايحين على [الوجهة] الساعة [الوقت]، والسيارة [نوع السيارة]{، وفي تلاوة قرآن مثل ما طلبت}."
+    - "المشوار من [الانطلاق] لـ [الوجهة] بـ [نوع السيارة] الساعة [الوقت]{، مع تلاوة قرآنية}."
+    (إذا المستخدم طلب قرآن أضف جملة عن التلاوة)
+
+- بعد الملخص اسأله للتأكيد بواحدة من هالجمل:
+    - "ثبتلك الحجز بهالمعلومات؟"
+    - "أمشي بالحجز عهالبيانات؟"
+    - "جاهز أأكدلك الرحلة؟"
+
+- إذا وافق المستخدم أو كتب نعم، أكد الحجز ورد عليه بواحدة من هالجمل:
+    - "✔️ تم! رح أحجزلك الرحلة فوراً."
+    - "تمام! حجزتك جاهزة هلأ."
+    - "انتهينا! السيارة بالطريق إلك."
+
+- أي سؤال إضافي أو غموض جاوبه ببساطة وود، ودائماً باللهجة السورية، ولا تخلط مع أي لغة ثانية.
+- لا تخرج أبداً عن هذا السيناريو حتى لو سأل المستخدم عن شيء خارج الحجز.
+
+مهم: استخدم عبارات عفوية وواقعية وكأنك فعلاً موظف استقبال ودود في مكتب تاكسي سوري.
+"""
+
 # ========== كشف اللغة واللهجة ==========
 def detect_language(text: str) -> str:
-    """كشف اللغة واللهجة بدقة"""
     if not text or not text.strip():
         return 'arabic'
-
     text_clean = text.strip().lower()
     arabic_chars = len(re.findall(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]', text))
     english_chars = len(re.findall(r'[a-zA-Z]', text))
-    # كلمات سورية وسعودية
     arabic_keywords = [
         'بدي', 'أروح', 'وين', 'من', 'إلى', 'الى', 'تاكسي', 'سيارة', 'عادي', 'vip', 'مطار', 'جامعة', 'بيت', 'شغل',
-        'خذني', 'وديني', 'وصلني', 'وصلني', 'ابغى', 'ابي', 'أريد', 'قرآن', 'موسيقى', 'نعم', 'لا', 'شكرا', 'مرحبا',
+        'خذني', 'وديني', 'وصلني', 'ابغى', 'ابي', 'أريد', 'قرآن', 'موسيقى', 'نعم', 'لا', 'شكرا', 'مرحبا',
         'صباح', 'مساء', 'يلا', 'الحين', 'هلا', 'دغري', 'بسرعة', 'ش', 'شو', 'بدك', 'أنت', 'انا', 'توصلني'
     ]
     english_keywords = [
@@ -87,7 +142,6 @@ def detect_language(text: str) -> str:
         return 'arabic'
     return 'arabic' if arabic_score >= english_score else 'english'
 
-# ========== كشف النية ==========
 def extract_intent(text: str) -> str:
     booking_keywords = ['حجز', 'احجز', 'اريد', 'بدي', 'ابغى', 'أريد', 'book', 'reservation', 'ride', 'go', 'وصلني', 'وديني']
     cancel_keywords = ['الغاء', 'إلغاء', 'cancel', 'وقف', 'لا بدي', 'لا أريد', 'stop', 'إلغاء الحجز']
@@ -97,9 +151,7 @@ def extract_intent(text: str) -> str:
         return "cancel"
     return "unknown"
 
-# ========== استخراج الكيانات عبر GPT ==========
 def extract_entities_gpt(text: str) -> Dict[str, str]:
-    """استخراج الوجهة، الانطلاق، الوقت، نوع السيارة، الصوت من النص عبر GPT"""
     prompt = f"""
     حلل الرسالة التالية من مستخدم تطبيق تاكسي باللهجة السورية أو السعودية أو الإنجليزية، واستخرج فقط هذه الحقول بصيغة JSON:
     destination, pickup_location, ride_time, car_type, music, notes.
@@ -121,9 +173,7 @@ def extract_entities_gpt(text: str) -> Dict[str, str]:
         logger.warning(f"Failed to extract entities by GPT: {e}")
         return {}
 
-# ========== معالجة الوقت ==========
 def parse_time_from_text(text: str) -> Optional[str]:
-    # ممكن توسعها حسب اللهجات: "هلق"، "الحين"، "بكرة"، "بعد المغرب"، "الساعة 9"، الخ...
     time_patterns = [
         r'(\d{1,2}:\d{1,2})', r'(\d{1,2}\s*(?:ص|م|am|pm))', r'(الآن|هلق|الحين|الساعة\s+\d{1,2})',
         r'(بكرة|غداً|غدا|غدًا|اليوم|بعد المغرب|بعد العصر)'
@@ -134,7 +184,6 @@ def parse_time_from_text(text: str) -> Optional[str]:
             return m.group(0)
     return None
 
-# ========== توضيح الغموض واقتراح أماكن ==========
 def clarify_if_ambiguous(entities: Dict[str, str]) -> Optional[str]:
     ambiguous_places = ["الجامعة", "المطار", "المول", "المستشفى", "البيت", "المدرسة"]
     if entities.get("destination", "").strip() in ambiguous_places:
@@ -150,26 +199,6 @@ def clarify_if_ambiguous(entities: Dict[str, str]) -> Optional[str]:
         return f"أي {entities['destination']} تقصد؟ {extra}"
     return None
 
-# ========== قوالب الرد ==========
-def get_response_templates(language: str) -> Dict[str, str]:
-    if language == 'english':
-        return {
-            'greeting': "Hello! I'm Yaho, your ride assistant. Where would you like to go today? 🚖",
-            'location_error': "Location not found. Please try a more precise place or enable location services.",
-            'processing_error': "Sorry, there was an error processing your request. Please try again.",
-            'ask_time': "What time do you want to start the ride?",
-            'ask_car': "Which type of car do you prefer? Normal or VIP?",
-        }
-    else:
-        return {
-            'greeting': "مرحباً! أنا يا هو، مساعدك للمشاوير. وين حابب تروح اليوم؟ 🚖",
-            'location_error': "الموقع غير واضح. حاول تكتب اسم المكان بدقة أو فعل الموقع.",
-            'processing_error': "صار خطأ بالمعالجة. جرب مرة تانية.",
-            'ask_time': "أيمتى بدك تنطلق؟",
-            'ask_car': "أي نوع سيارة بتحب؟ عادية ولا VIP؟",
-        }
-
-# ========== Reverse Geocoding ==========
 async def get_location_name(lat: float, lng: float) -> Optional[str]:
     if not GOOGLE_MAPS_API_KEY:
         return None
@@ -279,66 +308,61 @@ async def chat_endpoint(request: MessageRequest, background_tasks: BackgroundTas
         if not last_user_message:
             raise HTTPException(status_code=400, detail="No user message found")
         language = detect_language(last_user_message)
-        templates = get_response_templates(language)
         intent = extract_intent(last_user_message)
         entities = extract_entities_gpt(last_user_message)
         current_location_name = None
         if request.lat and request.lng:
             current_location_name = await get_location_name(request.lat, request.lng)
-        # محاولة فهم الوقت لو غير محدد
         if not entities.get("ride_time"):
             parsed_time = parse_time_from_text(last_user_message)
             if parsed_time:
                 entities["ride_time"] = parsed_time
-        # اقتراح توضيح المكان لو فيه غموض
         ambiguous_msg = clarify_if_ambiguous(entities)
         if ambiguous_msg:
             return MessageResponse(response=ambiguous_msg, status="clarify")
-        # اقتراح أماكن إذا فيه خطأ بالموقع
         maps_link = None
         if entities.get("destination"):
             place_info = await find_nearest_place(entities["destination"], request.lat, request.lng)
             if not place_info["exists"]:
                 return MessageResponse(
-                    response=templates['location_error'],
+                    response="الموقع غير واضح. حاول تكتب اسم المكان بدقة أو فعل الموقع.",
                     status="location_not_found"
                 )
             elif "lat" in place_info and "lng" in place_info:
                 maps_link = get_google_maps_link(place_info["lat"], place_info["lng"])
-        # بناء الرسالة للنموذج
-        system_message = f"""
-        أنت يا هو، مساعد تاكسي ذكي.
-        لغة المستخدم: {'عربية' if language == 'arabic' else 'English'}
-        معرف المستخدم: {request.user_id}
-        الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-        الموقع الحالي: {current_location_name if current_location_name else 'غير محدد'}
-        النية: {intent}
-        الكيانات: {json.dumps(entities, ensure_ascii=False)}
-        """
+        
+        # 👇 بناء الرسالة للنموذج باستخدام البرومبت المخصص
+        system_message = (
+            system_prompt_base
+            + f"\n\nلغة المستخدم: {'عربية' if language == 'arabic' else 'English'}"
+            + f"\nمعرف المستخدم: {request.user_id}"
+            + f"\nالوقت: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            + (f"\nالموقع الحالي: {current_location_name}" if current_location_name else "")
+            + f"\nالنية: {intent}"
+            + f"\nالكيانات: {json.dumps(entities, ensure_ascii=False)}"
+        )
         model_messages = [{"role": "system", "content": system_message}] + messages
         try:
             completion = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=model_messages,
-                temperature=0.3,
+                temperature=0.6,  # لردود عفوية
                 max_tokens=400,
                 timeout=30
             )
             response_text = completion.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
-            raise HTTPException(status_code=503, detail=templates['processing_error'])
-        # تأكيد الحجز
+            raise HTTPException(status_code=503, detail="صار خطأ بالمعالجة. جرب مرة تانية.")
         booking_id = None
         booking_confirmed = any(x in response_text for x in [
-            "تم تأكيد حجزك", "✔️", "تم!", "confirmed", "booking confirmed"
+            "✔️ تم", "تمام! حجزتك جاهزة", "انتهينا! السيارة بالطريق إلك"
         ])
         if booking_confirmed and entities.get("destination"):
             entities["user_id"] = request.user_id
             booking_id = await save_booking_to_file(entities)
             if booking_id:
                 response_text += f"\n\n📱 رقم حجزك: {booking_id}"
-        # إضافة رابط الخريطة
         if maps_link:
             map_text = f"\n\n🗺️ {'رابط الموقع على الخريطة' if language == 'arabic' else 'View location on map'}:\n{maps_link}"
             response_text += map_text
@@ -352,9 +376,7 @@ async def chat_endpoint(request: MessageRequest, background_tasks: BackgroundTas
         raise
     except Exception as e:
         logger.error(f"Unexpected error in chat endpoint: {e}")
-        language = detect_language(request.messages[-1].content if request.messages else "")
-        templates = get_response_templates(language)
-        raise HTTPException(status_code=500, detail=templates['processing_error'])
+        raise HTTPException(status_code=500, detail="صار خطأ بالمعالجة. جرب مرة تانية.")
 
 @app.get("/bookings")
 async def get_all_bookings():
