@@ -20,7 +20,11 @@ def haversine(lat1, lng1, lat2, lng2):
     return R * c
 
 def geocode(address: str) -> Optional[Dict[str, float]]:
-    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
+    url = (
+        "https://maps.googleapis.com/maps/api/geocode/json"
+        f"?address={address}&region=SY&language=ar&components=country:sy"
+        f"&key={GOOGLE_MAPS_API_KEY}"
+    )
     data = requests.get(url).json()
     if data["status"] == "OK" and data["results"]:
         loc = data["results"][0]["geometry"]["location"]
@@ -28,7 +32,11 @@ def geocode(address: str) -> Optional[Dict[str, float]]:
     return None
 
 def reverse_geocode(lat: float, lng: float) -> Optional[str]:
-    url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
+    url = (
+        "https://maps.googleapis.com/maps/api/geocode/json"
+        f"?latlng={lat},{lng}&region=SY&language=ar&components=country:sy"
+        f"&key={GOOGLE_MAPS_API_KEY}"
+    )
     data = requests.get(url).json()
     if data["status"] == "OK" and data["results"]:
         return data["results"][0].get("formatted_address", "")
@@ -40,7 +48,11 @@ def format_address(address: str) -> str:
     parts = [p.strip() for p in address.split(",")]
     street = ""
     city = ""
-    cities = ["الخبر", "الدمام", "الرياض", "جدة", "الظهران", "القطيف", "الجبيل", "الأحساء", "بقيق"]
+    # المدن السورية (عدّل القائمة لو تحب مدن أو مناطق معيّنة)
+    cities = [
+        "دمشق", "حلب", "حماة", "حمص", "اللاذقية", "طرطوس", "الرقة", "دير الزور",
+        "الحسكة", "القنيطرة", "السويداء", "درعا", "إدلب"
+    ]
     for p in parts:
         if "شارع" in p or "طريق" in p:
             street = p
@@ -67,7 +79,8 @@ def places_search(query: str, user_lat: float, user_lng: float, max_results=5) -
     url = (
         "https://maps.googleapis.com/maps/api/place/textsearch/json"
         f"?query={query}&location={user_lat},{user_lng}&radius=30000"
-        f"&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
+        f"&region=SY&language=ar&components=country:sy"
+        f"&key={GOOGLE_MAPS_API_KEY}"
     )
     data = requests.get(url).json()
     results = []
