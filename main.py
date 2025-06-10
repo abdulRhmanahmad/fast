@@ -1,4 +1,4 @@
-import os, uuid, requests, math
+import os, uuid, requests, math, json
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -11,7 +11,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# حساب المسافة بين نقطتين (بالكيلو)
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -21,7 +20,6 @@ def haversine(lat1, lng1, lat2, lng2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-# 1. Geocoding: اسم مكان إلى إحداثيات
 def geocode(address: str) -> Optional[Dict[str, float]]:
     url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
     data = requests.get(url).json()
@@ -30,7 +28,6 @@ def geocode(address: str) -> Optional[Dict[str, float]]:
         return {"lat": loc["lat"], "lng": loc["lng"]}
     return None
 
-# 2. Reverse Geocoding: إحداثيات إلى اسم مكان
 def reverse_geocode(lat: float, lng: float) -> Optional[str]:
     url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
     data = requests.get(url).json()
@@ -38,7 +35,6 @@ def reverse_geocode(lat: float, lng: float) -> Optional[str]:
         return data["results"][0].get("formatted_address", "")
     return None
 
-# 3. البحث عن أماكن (Places API)، يرجع قائمة النتائج مع المسافة والعنوان
 def places_search(query: str, user_lat: float, user_lng: float, max_results=3) -> Optional[List[Dict[str, Any]]]:
     url = (
         "https://maps.googleapis.com/maps/api/place/textsearch/json"
@@ -58,32 +54,10 @@ def places_search(query: str, user_lat: float, user_lng: float, max_results=3) -
                 "lng": loc["lng"],
                 "distance_km": round(dist, 2)
             })
-        # رتبهم حسب الأقرب
         results.sort(key=lambda x: x["distance_km"])
         return results[:max_results]
     return None
 
-# 4. الاقتراحات حسب إحداثيات (أماكن قريبة)
-def reverse_places(lat: float, lng: float, max_results=3) -> Optional[List[Dict[str, Any]]]:
-    url = (
-        "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-        f"?location={lat},{lng}&radius=500&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
-    )
-    data = requests.get(url).json()
-    results = []
-    if data["status"] == "OK" and data["results"]:
-        for res in data["results"]:
-            loc = res["geometry"]["location"]
-            results.append({
-                "name": res.get("name"),
-                "address": res.get("vicinity"),
-                "lat": loc["lat"],
-                "lng": loc["lng"],
-            })
-        return results[:max_results]
-    return None
-
-# 5. حساب زمن الرحلة والمسافة عبر Directions API
 def get_trip_info(start_lat, start_lng, end_lat, end_lng):
     url = (
         "https://maps.googleapis.com/maps/api/directions/json"
@@ -93,22 +67,42 @@ def get_trip_info(start_lat, start_lng, end_lat, end_lng):
     if data["status"] == "OK" and data["routes"]:
         leg = data["routes"][0]["legs"][0]
         return {
-            "distance": leg["distance"]["text"],      # مثال: "12 كم"
-            "duration": leg["duration"]["text"],      # مثال: "16 دقيقة"
+            "distance": leg["distance"]["text"],
+            "duration": leg["duration"]["text"],
             "end_address": leg["end_address"]
         }
     return None
 
-def extract_destination(text: str) -> str:
-    prompt = f'استخرج اسم الوجهة من الرسالة التالية بدون أي كلمات إضافية:\n"{text}"'
-    rsp = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "أجب بالاسم فقط."},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    return rsp.choices[0].message.content.strip()
+def extract_entities_gpt(text: str) -> Dict[str, str]:
+    prompt = f"""
+    استخرج من الرسالة التالية معلومات الحجز (بصيغة JSON فقط): 
+    {{"pickup_location": "", "destination": "", "ride_time": "", "car_type": "", "audio": "", "reciter": ""}}
+    إذا لم يوجد حقل اتركه فارغاً.
+    نص المستخدم: {text}
+    الجواب فقط JSON:
+    """
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=200,
+            timeout=10
+        )
+        entities = completion.choices[0].message.content
+        return json.loads(entities)
+    except Exception:
+        return {}
+
+def is_ambiguous_place(place: str) -> Optional[str]:
+    ambiguous = {
+        "الجامعة": "يوجد عدة جامعات. حدد اسم الجامعة (مثلاً: جامعة الملك سعود، الجامعة الافتراضية...).",
+        "المطار": "أي مطار تقصد؟ (مثلاً: مطار الرياض، مطار جدة...).",
+        "المول": "حدد اسم المول.",
+        "المستشفى": "حدد اسم المستشفى.",
+        "البيت": "حدد العنوان بدقة."
+    }
+    return ambiguous.get(place.strip(), None)
 
 class UserRequest(BaseModel):
     sessionId: Optional[str] = None
@@ -122,144 +116,109 @@ class BotResponse(BaseModel):
     done: bool = False
 
 def new_session(lat: float | None, lng: float | None) -> tuple[str, str]:
-    if not lat or not lng:
-        return "", "لا أستطيع تحديد موقعك. الرجاء إرسال الإحداثيات أولاً."
-    places = reverse_places(lat, lng)
-    if not places:
-        return "", "لم أستطع تحديد أقرب مكان لك. الرجاء المحاولة مرة أخرى."
-    start_name = f"{places[0]['name']}، {places[0]['address']}"
+    start_name = None
+    if lat and lng:
+        start_name = reverse_geocode(lat, lng)
     sess_id = str(uuid.uuid4())
     sessions[sess_id] = {
-        "step": "ask_destination",
+        "step": "in_progress",
         "lat": lat,
         "lng": lng,
-        "start_name": start_name,
-        "dest_name": None,
-        "time": None,
-        "car": None,
-        "audio": None,
-        "reciter": None,
-        "dest_coords": None,
-        "trip_info": None
+        "entities": {},
+        "summary": None,
+        "confirmed": False
     }
-    return sess_id, f"مرحباً! أنت الآن عند {start_name}. إلى أين تريد الذهاب اليوم؟"
+    msg = f"مرحباً! أين تريد الذهاب اليوم؟"
+    if start_name:
+        msg = f"مرحباً! أنت حالياً عند: {start_name}\nأين ترغب بالذهاب؟"
+    return sess_id, msg
 
-def proceed(session: Dict[str, Any], user_input: str) -> str:
-    step = session["step"]
-
-    if step == "ask_destination":
-        dest = extract_destination(user_input)
-        places = places_search(dest, session["lat"], session["lng"])
-        if not places:
-            return "تعذر تحديد موقع الوجهة. يرجى كتابة اسم أوضح أو أقرب حي/شارع."
-        if len(places) > 1:
-            session["possible_dest"] = places
-            session["step"] = "choose_dest"
-            return ("وجدت أكثر من مكان بهذا الاسم. يرجى اختيار أحدها:\n" +
-                "\n".join(f"{i+1}. {p['name']}، {p['address']} (يبعد {p['distance_km']} كم)" for i,p in enumerate(places)))
-        chosen = places[0]
-        session["dest_name"] = f"{chosen['name']}، {chosen['address']}"
-        session["dest_coords"] = (chosen['lat'], chosen['lng'])
-        session["step"] = "ask_start"
-        return (f"هل تريد أن نأخذك من موقعك الحالي ({session['start_name']}) أم تفضل الانطلاق من مكان آخر؟")
-
-    if step == "choose_dest":
-        try:
-            idx = int(user_input.strip()) - 1
-            chosen = session["possible_dest"][idx]
-            session["dest_name"] = f"{chosen['name']}، {chosen['address']}"
-            session["dest_coords"] = (chosen['lat'], chosen['lng'])
-            session["step"] = "ask_start"
-            return (f"تم اختيار: {session['dest_name']}.\n"
-                    "هل تريد أن نأخذك من موقعك الحالي أم تفضل الانطلاق من مكان آخر؟")
-        except:
-            return "الرجاء اختيار رقم صحيح من القائمة."
-
-    if step == "ask_start":
-        txt = user_input.strip().lower()
-        if txt in {"موقعي", "موقعي الحالي", "الموقع الحالي"}:
-            pass  # استخدم start_name المحسوب تلقائياً
+def build_summary(entities: Dict[str, Any], trip: dict | None) -> str:
+    parts = []
+    if entities.get("pickup_location"):
+        parts.append(f"من: {entities['pickup_location']}")
+    if entities.get("destination"):
+        parts.append(f"إلى: {entities['destination']}")
+    if entities.get("ride_time"):
+        parts.append(f"وقت الانطلاق: {entities['ride_time']}")
+    if entities.get("car_type"):
+        parts.append(f"نوع السيارة: {entities['car_type']}")
+    if entities.get("audio"):
+        part = "تشغيل"
+        if entities['audio'] == "القرآن":
+            part += " القرآن الكريم"
+            if entities.get("reciter"):
+                part += f" بصوت {entities['reciter']}"
         else:
-            places = places_search(user_input, session["lat"], session["lng"])
-            if not places:
-                return "تعذر تحديد موقع الانطلاق. يرجى كتابة اسم أوضح أو أقرب حي/شارع."
-            chosen = places[0]
-            session["start_name"] = f"{chosen['name']}، {chosen['address']}"
-            session["lat"], session["lng"] = chosen['lat'], chosen['lng']
-        session["step"] = "ask_time"
-        return "متى تريد الانطلاق؟"
-
-    if step == "ask_time":
-        session["time"] = user_input
-        session["step"] = "ask_car"
-        return "ما نوع السيارة التي تفضلها؟ عادية أم VIP؟"
-
-    if step == "ask_car":
-        session["car"] = user_input
-        session["step"] = "ask_audio"
-        return (
-            "هل تود الاستماع إلى شيء أثناء الرحلة؟ "
-            "يمكنك اختيار القرآن الكريم، الموسيقى، أو الصمت."
-        )
-
-    if step == "ask_audio":
-        txt = user_input.strip().lower()
-        if txt in {"القرآن", "قرآن", "quran"}:
-            session["audio"] = "القرآن"
-            session["step"] = "ask_reciter"
-            return "هل لديك قارئ مفضل أو نوع تلاوة تفضله؟"
-        else:
-            session["audio"] = user_input
-            session["step"] = "summary"
-            return build_summary(session)
-
-    if step == "ask_reciter":
-        session["reciter"] = user_input
-        session["step"] = "summary"
-        return build_summary(session)
-
-    if step == "summary":
-        # حساب معلومات الرحلة (المسافة والزمن)
-        if session.get("dest_coords"):
-            trip = get_trip_info(
-                session["lat"], session["lng"],
-                session["dest_coords"][0], session["dest_coords"][1]
-            )
-            session["trip_info"] = trip
-        if user_input.strip().lower() in {"نعم", "أجل", "أكيد", "موافق"}:
-            session["step"] = "confirmed"
-            return "تم تأكيد الحجز! ستصلك السيارة في الوقت المحدد."
-        else:
-            session["step"] = "canceled"
-            return "تم إلغاء الحجز بناءً على طلبك."
-
-    return "عذراً، لم أفهم. هل يمكنك التوضيح؟"
-
-def build_summary(s: Dict[str, Any]) -> str:
-    base = (
-        f"رحلتك من {s['start_name']} إلى {s['dest_name']} "
-        f"في الساعة {s['time']} بسيارة {s['car']}"
-    )
-    if s["trip_info"]:
-        base += f"\nالمسافة: {s['trip_info']['distance']}, الوقت المتوقع: {s['trip_info']['duration']}"
-    if s["audio"] == "القرآن":
-        base += "، مع تلاوة قرآنية"
-        if s["reciter"]:
-            base += f" بصوت {s['reciter']}"
-    return base + ". هل تريد تأكيد الحجز بهذه التفاصيل؟"
+            part += f" {entities['audio']}"
+        parts.append(part)
+    summary = "، ".join(parts)
+    if trip:
+        summary += f"\nالمسافة: {trip['distance']}, الوقت المتوقع: {trip['duration']}"
+    summary += "\nهل تريد تأكيد الحجز بهذه التفاصيل؟"
+    return summary
 
 @app.post("/chatbot", response_model=BotResponse)
 def chatbot(req: UserRequest):
+    # بدء جلسة جديدة إذا لزم
     if not req.sessionId or req.sessionId not in sessions:
         if req.lat is None or req.lng is None:
             return BotResponse(
                 sessionId="",
-                botMessage="لا أستطيع تحديد موقعك. الرجاء إرسال الإحداثيات أولاً.",
+                botMessage="يرجى إرسال موقعك الحالي أولاً (إحداثيات).",
             )
         sess_id, msg = new_session(req.lat, req.lng)
         return BotResponse(sessionId=sess_id, botMessage=msg)
-
     sess = sessions[req.sessionId]
-    reply = proceed(sess, req.userInput or "")
-    done = sess.get("step") in {"confirmed", "canceled"}
-    return BotResponse(sessionId=req.sessionId, botMessage=reply, done=done)
+    user_msg = req.userInput or ""
+    # تحليل النص واستخراج الكيانات دفعة وحدة
+    entities = extract_entities_gpt(user_msg)
+    sess["entities"].update({k: v for k, v in entities.items() if v})
+    e = sess["entities"]
+
+    # لو فيه غموض
+    for field in ["destination", "pickup_location"]:
+        if field in e and is_ambiguous_place(e[field]):
+            return BotResponse(
+                sessionId=req.sessionId,
+                botMessage=is_ambiguous_place(e[field]),
+                done=False
+            )
+    # ترتيب الأسئلة حسب الناقص
+    if not e.get("destination"):
+        return BotResponse(sessionId=req.sessionId, botMessage="إلى أين الوجهة؟", done=False)
+    if not e.get("pickup_location"):
+        msg = "من أين نبدأ الرحلة؟ إذا أردت موقعك الحالي اكتب: موقعي الحالي"
+        return BotResponse(sessionId=req.sessionId, botMessage=msg, done=False)
+    if not e.get("ride_time"):
+        return BotResponse(sessionId=req.sessionId, botMessage="متى تريد الانطلاق؟", done=False)
+    if not e.get("car_type"):
+        return BotResponse(sessionId=req.sessionId, botMessage="ما نوع السيارة؟ عادية أم VIP؟", done=False)
+    # اختيار صوت/تلاوة
+    if not e.get("audio"):
+        return BotResponse(sessionId=req.sessionId, botMessage="هل تريد تشغيل شيء أثناء الرحلة؟ مثل القرآن أو موسيقى أو لا شيء.", done=False)
+    if e.get("audio", "").strip().lower() in {"القرآن", "قرآن", "quran"} and not e.get("reciter"):
+        return BotResponse(sessionId=req.sessionId, botMessage="هل لديك قارئ معين تفضل الاستماع إليه؟", done=False)
+
+    # إذا اكتملت الكيانات، أعطيه ملخص واحسب الرحلة
+    if not sess.get("summary"):
+        # حساب الإحداثيات إذا لزم
+        pickup_coords = geocode(e["pickup_location"]) if e["pickup_location"] != "موقعي الحالي" else {"lat": sess["lat"], "lng": sess["lng"]}
+        dest_coords = geocode(e["destination"])
+        trip = None
+        if pickup_coords and dest_coords:
+            trip = get_trip_info(
+                pickup_coords["lat"], pickup_coords["lng"], dest_coords["lat"], dest_coords["lng"]
+            )
+        sess["summary"] = build_summary(e, trip)
+        return BotResponse(sessionId=req.sessionId, botMessage=sess["summary"], done=False)
+    # بانتظار التأكيد
+    txt = user_msg.strip().lower()
+    if txt in {"نعم", "أجل", "أكيد", "موافق", "yes", "ok"}:
+        sess["confirmed"] = True
+        return BotResponse(sessionId=req.sessionId, botMessage="تم تأكيد الحجز! 🚖✔️", done=True)
+    if txt in {"لا", "إلغاء", "cancel"}:
+        sess["confirmed"] = False
+        return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز بناء على طلبك.", done=True)
+    # إذا لا يزال في مرحلة التأكيد
+    return BotResponse(sessionId=req.sessionId, botMessage="هل تريد تأكيد الحجز؟", done=False)
