@@ -11,9 +11,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# دالة لحساب المسافة بين نقطتين بالإحداثيات (كم)
+# حساب المسافة بين نقطتين بالإحداثيات
 def haversine(lat1, lng1, lat2, lng2):
-    R = 6371  # نصف قطر الأرض كم
+    R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lng2 - lng1)
@@ -21,47 +21,57 @@ def haversine(lat1, lng1, lat2, lng2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-# geocode مع اختيار أقرب نتيجة ضمن الشرقية
-def geocode_and_check_eastern(name: str, user_lat: float, user_lng: float):
+# Places API فقط
+def places_search_and_check_eastern(query: str, user_lat: float, user_lng: float):
     url = (
-        "https://maps.googleapis.com/maps/api/geocode/json"
-        f"?address={name}&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
+        "https://maps.googleapis.com/maps/api/place/textsearch/json"
+        f"?query={query}&location={user_lat},{user_lng}&radius=30000"
+        f"&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
     )
     data = requests.get(url).json()
     if data["status"] == "OK" and data["results"]:
         best = None
         best_dist = float("inf")
         for res in data["results"]:
-            # تحقق أنه ضمن الشرقية
-            for comp in res["address_components"]:
-                if (
-                    ("الشرقية" in comp.get("long_name", ""))
-                    or ("Eastern Province" in comp.get("long_name", ""))
-                ):
+            place_id = res["place_id"]
+            # جلب تفاصيل المكان
+            details_url = (
+                "https://maps.googleapis.com/maps/api/place/details/json"
+                f"?place_id={place_id}&language=ar&region=SA&key={GOOGLE_MAPS_API_KEY}"
+            )
+            details = requests.get(details_url).json()
+            if details.get("status") == "OK":
+                address = details["result"].get("formatted_address", "")
+                # لازم يحتوي "الشرقية"
+                if "الشرقية" in address or "Eastern Province" in address:
                     loc = res["geometry"]["location"]
                     dist = haversine(user_lat, user_lng, loc["lat"], loc["lng"])
                     if dist < best_dist:
-                        best = res
+                        best = details["result"]["name"] + "، " + address
                         best_dist = dist
         if best:
-            return best["formatted_address"]
+            return best
     return None
 
-# reverse geocode مع اختيار أقرب عنوان للشرقية
-def reverse_geocode(lat: float, lng: float):
+# جلب أقرب عنوان لموقع المستخدم الحالي
+def reverse_places(lat: float, lng: float):
     url = (
-        "https://maps.googleapis.com/maps/api/geocode/json"
-        f"?latlng={lat},{lng}&language=ar&region=SA&key={GOOGLE_MAPS_API_KEY}"
+        "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+        f"?location={lat},{lng}&radius=100&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
     )
     data = requests.get(url).json()
-    if data["status"] == "OK":
+    if data["status"] == "OK" and data["results"]:
         for res in data["results"]:
-            for comp in res["address_components"]:
-                if (
-                    ("الشرقية" in comp.get("long_name", ""))
-                    or ("Eastern Province" in comp.get("long_name", ""))
-                ):
-                    return res["formatted_address"]
+            place_id = res["place_id"]
+            details_url = (
+                "https://maps.googleapis.com/maps/api/place/details/json"
+                f"?place_id={place_id}&language=ar&region=SA&key={GOOGLE_MAPS_API_KEY}"
+            )
+            details = requests.get(details_url).json()
+            if details.get("status") == "OK":
+                address = details["result"].get("formatted_address", "")
+                if "الشرقية" in address or "Eastern Province" in address:
+                    return details["result"]["name"] + "، " + address
     return None
 
 def extract_destination(text: str) -> str:
@@ -87,7 +97,7 @@ class BotResponse(BaseModel):
     done: bool = False
 
 def new_session(lat: float | None, lng: float | None) -> tuple[str, str]:
-    start_name = reverse_geocode(lat, lng) if lat and lng else None
+    start_name = reverse_places(lat, lng) if lat and lng else None
     if not start_name:
         return "", "عذراً، هذه الخدمة متوفرة فقط في المنطقة الشرقية. يرجى تحديد موقعك داخل الشرقية."
     sess_id = str(uuid.uuid4())
@@ -107,10 +117,9 @@ def new_session(lat: float | None, lng: float | None) -> tuple[str, str]:
 def proceed(session: Dict[str, Any], user_input: str) -> str:
     step = session["step"]
 
-    # 1) الوجهة
     if step == "ask_destination":
         dest = extract_destination(user_input)
-        dest_name = geocode_and_check_eastern(dest, session["lat"], session["lng"])
+        dest_name = places_search_and_check_eastern(dest, session["lat"], session["lng"])
         if not dest_name:
             return "تعذر تحديد موقع الوجهة أو أنها ليست ضمن المنطقة الشرقية. يرجى كتابة اسم أوضح أو أقرب حي/شارع داخل الشرقية."
         session["dest_name"] = dest_name
@@ -120,21 +129,18 @@ def proceed(session: Dict[str, Any], user_input: str) -> str:
             " أم تفضل الانطلاق من مكان آخر؟"
         )
 
-    # 2) جهة الانطلاق
     if step == "ask_start":
         txt = user_input.strip().lower()
         if txt in {"موقعي", "موقعي الحالي", "الموقع الحالي"}:
-            # استخدم الموقع الحالي (تم التحقق منه مسبقاً)
-            pass
+            pass  # استخدم start_name المحسوب تلقائياً
         else:
-            start_name = geocode_and_check_eastern(user_input, session["lat"], session["lng"])
+            start_name = places_search_and_check_eastern(user_input, session["lat"], session["lng"])
             if not start_name:
                 return "تعذر تحديد موقع الانطلاق أو أنه ليس ضمن المنطقة الشرقية. يرجى كتابة اسم أوضح أو أقرب حي/شارع داخل الشرقية."
             session["start_name"] = start_name
         session["step"] = "ask_time"
         return "متى تريد الانطلاق؟"
 
-    # باقي الخطوات كما هي...
     if step == "ask_time":
         session["time"] = user_input
         session["step"] = "ask_car"
