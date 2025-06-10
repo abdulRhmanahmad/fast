@@ -35,43 +35,36 @@ def reverse_geocode(lat: float, lng: float) -> Optional[str]:
         return data["results"][0].get("formatted_address", "")
     return None
 
-def places_search(query: str, user_lat: float, user_lng: float, max_results=3) -> Optional[List[Dict[str, Any]]]:
-    url = (
-        "https://maps.googleapis.com/maps/api/place/textsearch/json"
-        f"?query={query}&location={user_lat},{user_lng}&radius=30000"
-        f"&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
-    )
-    data = requests.get(url).json()
-    results = []
-    if data["status"] == "OK" and data["results"]:
-        for res in data["results"]:
-            loc = res["geometry"]["location"]
-            dist = haversine(user_lat, user_lng, loc["lat"], loc["lng"])
-            results.append({
-                "name": res.get("name"),
-                "address": res.get("formatted_address"),
-                "lat": loc["lat"],
-                "lng": loc["lng"],
-                "distance_km": round(dist, 2)
-            })
-        results.sort(key=lambda x: x["distance_km"])
-        return results[:max_results]
-    return None
+def format_address(address: str) -> str:
+    # مثال: "8844 شارع بدر، 2888، الثقبة، الخبر 34623، السعودية"
+    # نريد: "شارع بدر، الخبر"
+    parts = [p.strip() for p in address.split(",")]
+    street = ""
+    city = ""
+    cities = ["الخبر", "الدمام", "الرياض", "جدة", "الظهران", "القطيف", "الجبيل", "الأحساء", "بقيق"]
+    # ابحث عن شارع
+    for p in parts:
+        if "شارع" in p or "طريق" in p:
+            street = p
+            break
+    # ابحث عن مدينة
+    for p in parts:
+        for city_name in cities:
+            if city_name in p:
+                city = city_name
+                break
+    result = ""
+    if street:
+        result += street
+    if city:
+        result += ("، " if street else "") + city
+    return result if result else parts[0]  # fallback
 
-def get_trip_info(start_lat, start_lng, end_lat, end_lng):
-    url = (
-        "https://maps.googleapis.com/maps/api/directions/json"
-        f"?origin={start_lat},{start_lng}&destination={end_lat},{end_lng}&region=SA&language=ar&key={GOOGLE_MAPS_API_KEY}"
-    )
-    data = requests.get(url).json()
-    if data["status"] == "OK" and data["routes"]:
-        leg = data["routes"][0]["legs"][0]
-        return {
-            "distance": leg["distance"]["text"],
-            "duration": leg["duration"]["text"],
-            "end_address": leg["end_address"]
-        }
-    return None
+def get_location_text(lat, lng):
+    address = reverse_geocode(lat, lng)
+    if not address:
+        return "موقعك غير معروف"
+    return format_address(address)
 
 def extract_entities_gpt(text: str) -> Dict[str, str]:
     prompt = f"""
@@ -115,24 +108,6 @@ class BotResponse(BaseModel):
     botMessage: str
     done: bool = False
 
-def new_session(lat: float | None, lng: float | None) -> tuple[str, str]:
-    start_name = None
-    if lat and lng:
-        start_name = reverse_geocode(lat, lng)
-    sess_id = str(uuid.uuid4())
-    sessions[sess_id] = {
-        "step": "in_progress",
-        "lat": lat,
-        "lng": lng,
-        "entities": {},
-        "summary": None,
-        "confirmed": False
-    }
-    msg = f"مرحباً! أين تريد الذهاب اليوم؟"
-    if start_name:
-        msg = f"مرحباً! أنت حالياً عند: {start_name}\nأين ترغب بالذهاب؟"
-    return sess_id, msg
-
 def build_summary(entities: Dict[str, Any], trip: dict | None) -> str:
     parts = []
     if entities.get("pickup_location"):
@@ -163,55 +138,64 @@ def chatbot(req: UserRequest):
     # بدء جلسة جديدة إذا لزم
     if not req.sessionId or req.sessionId not in sessions:
         if req.lat is None or req.lng is None:
-            return BotResponse(
-                sessionId="",
-                botMessage="يرجى إرسال موقعك الحالي أولاً (إحداثيات).",
-            )
-        sess_id, msg = new_session(req.lat, req.lng)
+            return BotResponse(sessionId="", botMessage="يرجى إرسال موقعك الحالي أولاً.",)
+        sess_id = str(uuid.uuid4())
+        loc_txt = get_location_text(req.lat, req.lng)
+        msg = f"مرحباً! أنت حالياً عند: {loc_txt}\nإلى أين الوجهة؟"
+        sessions[sess_id] = {"step": "in_progress", "lat": req.lat, "lng": req.lng, "entities": {}, "last_question": "destination"}
         return BotResponse(sessionId=sess_id, botMessage=msg)
+
     sess = sessions[req.sessionId]
     user_msg = req.userInput or ""
-    # تحليل النص واستخراج الكيانات دفعة وحدة
     entities = extract_entities_gpt(user_msg)
     sess["entities"].update({k: v for k, v in entities.items() if v})
     e = sess["entities"]
 
-    # لو فيه غموض
-    for field in ["destination", "pickup_location"]:
-        if field in e and is_ambiguous_place(e[field]):
-            return BotResponse(
-                sessionId=req.sessionId,
-                botMessage=is_ambiguous_place(e[field]),
-                done=False
-            )
-    # ترتيب الأسئلة حسب الناقص
+    # سؤال الوجهة فقط مرة واحدة
     if not e.get("destination"):
-        return BotResponse(sessionId=req.sessionId, botMessage="إلى أين الوجهة؟", done=False)
+        if sess.get("last_question") != "destination":
+            sess["last_question"] = "destination"
+            return BotResponse(sessionId=req.sessionId, botMessage="إلى أين الوجهة؟", done=False)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="بانتظار تحديد الوجهة...", done=False)
+    # باقي الأسئلة بنفس المنطق (تقدر تطبق على الوقت ونوع السيارة...)
     if not e.get("pickup_location"):
-        msg = "من أين نبدأ الرحلة؟ إذا أردت موقعك الحالي اكتب: موقعي الحالي"
-        return BotResponse(sessionId=req.sessionId, botMessage=msg, done=False)
+        if sess.get("last_question") != "pickup_location":
+            sess["last_question"] = "pickup_location"
+            msg = "من أين نبدأ الرحلة؟ إذا أردت موقعك الحالي اكتب: موقعي الحالي"
+            return BotResponse(sessionId=req.sessionId, botMessage=msg, done=False)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="بانتظار تحديد مكان الانطلاق...", done=False)
     if not e.get("ride_time"):
-        return BotResponse(sessionId=req.sessionId, botMessage="متى تريد الانطلاق؟", done=False)
+        if sess.get("last_question") != "ride_time":
+            sess["last_question"] = "ride_time"
+            return BotResponse(sessionId=req.sessionId, botMessage="متى تريد الانطلاق؟", done=False)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="بانتظار تحديد وقت الانطلاق...", done=False)
     if not e.get("car_type"):
-        return BotResponse(sessionId=req.sessionId, botMessage="ما نوع السيارة؟ عادية أم VIP؟", done=False)
-    # اختيار صوت/تلاوة
+        if sess.get("last_question") != "car_type":
+            sess["last_question"] = "car_type"
+            return BotResponse(sessionId=req.sessionId, botMessage="ما نوع السيارة؟ عادية أم VIP؟", done=False)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="بانتظار اختيار نوع السيارة...", done=False)
     if not e.get("audio"):
-        return BotResponse(sessionId=req.sessionId, botMessage="هل تريد تشغيل شيء أثناء الرحلة؟ مثل القرآن أو موسيقى أو لا شيء.", done=False)
+        if sess.get("last_question") != "audio":
+            sess["last_question"] = "audio"
+            return BotResponse(sessionId=req.sessionId, botMessage="هل تريد تشغيل شيء أثناء الرحلة؟ مثل القرآن أو موسيقى أو لا شيء.", done=False)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="بانتظار اختيار الصوت...", done=False)
     if e.get("audio", "").strip().lower() in {"القرآن", "قرآن", "quran"} and not e.get("reciter"):
-        return BotResponse(sessionId=req.sessionId, botMessage="هل لديك قارئ معين تفضل الاستماع إليه؟", done=False)
+        if sess.get("last_question") != "reciter":
+            sess["last_question"] = "reciter"
+            return BotResponse(sessionId=req.sessionId, botMessage="هل لديك قارئ معين تفضل الاستماع إليه؟", done=False)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="بانتظار تحديد القارئ...", done=False)
 
-    # إذا اكتملت الكيانات، أعطيه ملخص واحسب الرحلة
+    # إذا اكتملت الكيانات، أعطيه ملخص واحسب الرحلة (اختياري: أضف حساب المسافة)
     if not sess.get("summary"):
-        # حساب الإحداثيات إذا لزم
-        pickup_coords = geocode(e["pickup_location"]) if e["pickup_location"] != "موقعي الحالي" else {"lat": sess["lat"], "lng": sess["lng"]}
-        dest_coords = geocode(e["destination"])
-        trip = None
-        if pickup_coords and dest_coords:
-            trip = get_trip_info(
-                pickup_coords["lat"], pickup_coords["lng"], dest_coords["lat"], dest_coords["lng"]
-            )
-        sess["summary"] = build_summary(e, trip)
+        sess["summary"] = build_summary(e, None)  # ممكن تضيف معلومات الرحلة لو حاب
         return BotResponse(sessionId=req.sessionId, botMessage=sess["summary"], done=False)
+
     # بانتظار التأكيد
     txt = user_msg.strip().lower()
     if txt in {"نعم", "أجل", "أكيد", "موافق", "yes", "ok"}:
@@ -220,5 +204,4 @@ def chatbot(req: UserRequest):
     if txt in {"لا", "إلغاء", "cancel"}:
         sess["confirmed"] = False
         return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز بناء على طلبك.", done=True)
-    # إذا لا يزال في مرحلة التأكيد
     return BotResponse(sessionId=req.sessionId, botMessage="هل تريد تأكيد الحجز؟", done=False)
