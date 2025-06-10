@@ -11,7 +11,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# حساب المسافة بين نقطتين بالإحداثيات
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -21,8 +20,8 @@ def haversine(lat1, lng1, lat2, lng2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-# Places API فقط
-def places_search_and_check_eastern(query: str, user_lat: float, user_lng: float):
+# Places API فقط (بدون شرط الشرقية)
+def places_search(query: str, user_lat: float, user_lng: float):
     url = (
         "https://maps.googleapis.com/maps/api/place/textsearch/json"
         f"?query={query}&location={user_lat},{user_lng}&radius=30000"
@@ -34,7 +33,6 @@ def places_search_and_check_eastern(query: str, user_lat: float, user_lng: float
         best_dist = float("inf")
         for res in data["results"]:
             place_id = res["place_id"]
-            # جلب تفاصيل المكان
             details_url = (
                 "https://maps.googleapis.com/maps/api/place/details/json"
                 f"?place_id={place_id}&language=ar&region=SA&key={GOOGLE_MAPS_API_KEY}"
@@ -42,18 +40,15 @@ def places_search_and_check_eastern(query: str, user_lat: float, user_lng: float
             details = requests.get(details_url).json()
             if details.get("status") == "OK":
                 address = details["result"].get("formatted_address", "")
-                # لازم يحتوي "الشرقية"
-                if "الشرقية" in address or "Eastern Province" in address:
-                    loc = res["geometry"]["location"]
-                    dist = haversine(user_lat, user_lng, loc["lat"], loc["lng"])
-                    if dist < best_dist:
-                        best = details["result"]["name"] + "، " + address
-                        best_dist = dist
+                loc = res["geometry"]["location"]
+                dist = haversine(user_lat, user_lng, loc["lat"], loc["lng"])
+                if dist < best_dist:
+                    best = details["result"]["name"] + "، " + address
+                    best_dist = dist
         if best:
             return best
     return None
 
-# جلب أقرب عنوان لموقع المستخدم الحالي
 def reverse_places(lat: float, lng: float):
     url = (
         "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
@@ -70,8 +65,8 @@ def reverse_places(lat: float, lng: float):
             details = requests.get(details_url).json()
             if details.get("status") == "OK":
                 address = details["result"].get("formatted_address", "")
-                if "الشرقية" in address or "Eastern Province" in address:
-                    return details["result"]["name"] + "، " + address
+                # هنا ألغينا شرط الشرقية
+                return details["result"]["name"] + "، " + address
     return None
 
 def extract_destination(text: str) -> str:
@@ -99,7 +94,7 @@ class BotResponse(BaseModel):
 def new_session(lat: float | None, lng: float | None) -> tuple[str, str]:
     start_name = reverse_places(lat, lng) if lat and lng else None
     if not start_name:
-        return "", "عذراً، هذه الخدمة متوفرة فقط في المنطقة الشرقية. يرجى تحديد موقعك داخل الشرقية."
+        return "", "لا أستطيع تحديد موقعك. الرجاء إرسال الإحداثيات أولاً."
     sess_id = str(uuid.uuid4())
     sessions[sess_id] = {
         "step": "ask_destination",
@@ -119,9 +114,9 @@ def proceed(session: Dict[str, Any], user_input: str) -> str:
 
     if step == "ask_destination":
         dest = extract_destination(user_input)
-        dest_name = places_search_and_check_eastern(dest, session["lat"], session["lng"])
+        dest_name = places_search(dest, session["lat"], session["lng"])
         if not dest_name:
-            return "تعذر تحديد موقع الوجهة أو أنها ليست ضمن المنطقة الشرقية. يرجى كتابة اسم أوضح أو أقرب حي/شارع داخل الشرقية."
+            return "تعذر تحديد موقع الوجهة. يرجى كتابة اسم أوضح أو أقرب حي/شارع."
         session["dest_name"] = dest_name
         session["step"] = "ask_start"
         return (
@@ -134,9 +129,9 @@ def proceed(session: Dict[str, Any], user_input: str) -> str:
         if txt in {"موقعي", "موقعي الحالي", "الموقع الحالي"}:
             pass  # استخدم start_name المحسوب تلقائياً
         else:
-            start_name = places_search_and_check_eastern(user_input, session["lat"], session["lng"])
+            start_name = places_search(user_input, session["lat"], session["lng"])
             if not start_name:
-                return "تعذر تحديد موقع الانطلاق أو أنه ليس ضمن المنطقة الشرقية. يرجى كتابة اسم أوضح أو أقرب حي/شارع داخل الشرقية."
+                return "تعذر تحديد موقع الانطلاق. يرجى كتابة اسم أوضح أو أقرب حي/شارع."
             session["start_name"] = start_name
         session["step"] = "ask_time"
         return "متى تريد الانطلاق؟"
