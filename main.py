@@ -57,6 +57,12 @@ def format_address(address: str) -> str:
     return result if result else parts[0]
 
 # --------- دالة تحديد نص الموقع -----------
+def remove_country(text):
+    if not text:
+        return ""
+    # يشيل "سوريا" من نهاية النص، سواء مع فاصلة أو بدون
+    return re.sub(r"(،?\s*سوريا)$", "", text.strip())
+
 def get_location_text(lat, lng):
     address = reverse_geocode(lat, lng)
     if not address:
@@ -304,7 +310,10 @@ def chatbot(req: UserRequest):
             if len(places) > 1:
                 sess["step"] = "choose_destination"
                 sess["possible_places"] = places
-                options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
+                # options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
+                options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(places)])
+
+
                 return BotResponse(
                     sessionId=req.sessionId,
                     botMessage=f"وجدت أكثر من مكان:\n{options}\nيرجى اختيار رقم أو كتابة اسم المكان الصحيح.",
@@ -319,7 +328,12 @@ def chatbot(req: UserRequest):
                 sess["step"] = "ask_pickup"
                 return BotResponse(
                     sessionId=req.sessionId,
-                    botMessage=f"✔️ تم اختيار الوجهة: {place_info['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
+                    # botMessage=f"✔️ تم اختيار الوجهة: {place_info['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
+                    botMessage = (
+    f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}."
+    f"\nمن أين تود الانطلاق؟ من موقعك الحالي ({remove_country(sess['loc_txt'])}) أم من مكان آخر؟"
+)
+
                     done=False
                 )
 
@@ -355,7 +369,12 @@ def chatbot(req: UserRequest):
             if found:
                 return BotResponse(
                     sessionId=req.sessionId,
-                    botMessage=f"✔️ تم اختيار الوجهة: {sess['chosen_place']['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
+                    # botMessage=f"✔️ تم اختيار الوجهة: {sess['chosen_place']['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
+                    botMessage = (
+    f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}."
+    f"\nمن أين تود الانطلاق؟ من موقعك الحالي ({remove_country(sess['loc_txt'])}) أم من مكان آخر؟"
+)
+
                     done=False
                 )
             else:
@@ -379,7 +398,9 @@ def chatbot(req: UserRequest):
                 if len(places) > 1:
                     sess["step"] = "choose_pickup"
                     sess["possible_pickup_places"] = places
-                    options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
+                    # options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
+                    options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(places)])
+
                     return BotResponse(
                         sessionId=req.sessionId,
                         botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nيرجى اختيار رقم أو كتابة اسم المكان الصحيح.",
@@ -459,12 +480,14 @@ def chatbot(req: UserRequest):
             sess["step"] = "confirm_booking"
             summary = f"""
 ✔️ ملخص طلبك:
-📍 من: {sess['pickup']}
-🎯 إلى: {sess['chosen_place']['address']}
+📍 من: {remove_country(sess['pickup'])}
+🎯 إلى: {remove_country(sess['chosen_place']['address'])}
 ⏰ الوقت: {sess['time']}
 🚗 نوع السيارة: {sess['car']}
 🎵 الصوت: {sess['audio']}
+ 
 
+           
 هل تؤكد الحجز؟ (نعم/لا)
 """
             return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
