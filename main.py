@@ -101,6 +101,7 @@ def get_place_details(place_id: str) -> dict:
             "lng": loc["lng"],
         }
     return {}
+
 # ---- دالة الحجز الوهمية ----
 def create_mock_booking(pickup, destination, time, car_type, audio_pref, user_id=None):
     booking_id = random.randint(10000, 99999)
@@ -250,4 +251,118 @@ def chatbot(req: UserRequest):
                 options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
                 return BotResponse(
                     sessionId=req.sessionId,
-                    botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nيرجى اختيار رقم أو كتابة    
+                    botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nيرجى اختيار رقم أو كتابة اسم المكان الصحيح.",
+                    done=False
+                )
+            else:
+                place_info = get_place_details(places[0]['place_id'])
+                sess["pickup"] = place_info['address']
+                sess["step"] = "ask_time"
+                return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
+
+    # -------- الخطوة 4: اختيار نقطة الانطلاق من القائمة --------
+    if step == "choose_pickup":
+        places = sess.get("possible_pickup_places", [])
+        user_reply = user_msg.strip().lower()
+        found = False
+        # إذا رقم
+        try:
+            idx = int(user_reply) - 1
+            if 0 <= idx < len(places):
+                place_id = places[idx]['place_id']
+                place_info = get_place_details(place_id)
+                sess["pickup"] = place_info['address']
+                sess["step"] = "ask_time"
+                found = True
+        except:
+            pass
+        # إذا نص (يطابق بالوصف)
+        if not found:
+            for i, p in enumerate(places):
+                if user_reply in (p['description'] or '').lower():
+                    place_id = p['place_id']
+                    place_info = get_place_details(place_id)
+                    sess["pickup"] = place_info['address']
+                    sess["step"] = "ask_time"
+                    found = True
+                    break
+        if found:
+            return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم أو كتابة اسم المكان كما في القائمة.", done=False)
+
+    # -------- الخطوة 5: تحديد الوقت --------
+    if step == "ask_time":
+        user_reply = user_msg.strip().lower()
+        if user_reply in ["الآن", "حالا", "حاضر", "فوري"]:
+            sess["time"] = "الآن"
+        else:
+            sess["time"] = user_msg.strip()
+        sess["step"] = "ask_car_type"
+        return BotResponse(sessionId=req.sessionId, botMessage="أي نوع سيارة تفضل؟ سيارة عادية أم VIP؟", done=False)
+
+    # -------- الخطوة 6: نوع السيارة --------
+    if step == "ask_car_type":
+        user_reply = user_msg.strip().lower()
+        if "vip" in user_reply or "في آي بي" in user_reply or "فاخرة" in user_reply:
+            sess["car"] = "VIP"
+        else:
+            sess["car"] = "عادية"
+        sess["step"] = "ask_audio"
+        return BotResponse(sessionId=req.sessionId, botMessage="ما تفضيلك للصوت أثناء الرحلة؟ قرآن، موسيقى، أم صمت؟", done=False)
+
+    # -------- الخطوة 7: تفضيلات الصوت --------
+    if step == "ask_audio":
+        user_reply = user_msg.strip().lower()
+        if "قرآن" in user_reply or "قران" in user_reply:
+            sess["audio"] = "قرآن"
+        elif "موسيقى" in user_reply or "موسيقا" in user_reply or "أغاني" in user_reply:
+            sess["audio"] = "موسيقى"
+        else:
+            sess["audio"] = "صمت"
+        sess["step"] = "confirm_booking"
+        
+        # إنشاء ملخص الطلب
+        summary = f"""
+✔️ ملخص طلبك:
+📍 من: {sess['pickup']}
+🎯 إلى: {sess['chosen_place']['address']}
+⏰ الوقت: {sess['time']}
+🚗 نوع السيارة: {sess['car']}
+🎵 الصوت: {sess['audio']}
+
+هل تؤكد الحجز؟ (نعم/لا)
+"""
+        return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
+
+    # -------- الخطوة 8: تأكيد الحجز --------
+    if step == "confirm_booking":
+        user_reply = user_msg.strip().lower()
+        if user_reply in ["نعم", "موافق", "أكد", "تأكيد", "yes", "ok"]:
+            # إنشاء الحجز
+            booking_id = create_mock_booking(
+                pickup=sess['pickup'],
+                destination=sess['chosen_place']['address'],
+                time=sess['time'],
+                car_type=sess['car'],
+                audio_pref=sess['audio']
+            )
+            
+            success_msg = f"""
+🎉 تم تأكيد حجزك بنجاح!
+رقم الحجز: {booking_id}
+
+📱 ستصلك رسالة تأكيد قريباً
+🚗 السائق في الطريق إليك
+⏱️ الوقت المتوقع: 5-10 دقائق
+
+شكراً لاستخدامك خدمة يا هو! 🚖
+"""
+            # إنهاء الجلسة
+            del sessions[req.sessionId]
+            return BotResponse(sessionId=req.sessionId, botMessage=success_msg, done=True)
+        else:
+            return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز. هل تود بدء حجز جديد؟", done=True)
+
+    # خطوة افتراضية
+    return BotResponse(sessionId=req.sessionId, botMessage="عذراً، حدث خطأ. حاول مرة أخرى.", done=False)
