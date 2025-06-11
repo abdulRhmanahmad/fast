@@ -61,28 +61,46 @@ def get_location_text(lat, lng):
         return "موقعك غير معروف"
     return format_address(address)
 
-def places_search(query: str, user_lat: float, user_lng: float, max_results=5) -> Optional[List[Dict[str, Any]]]:
+# ---- Places Autocomplete (مطابقة لتطبيقك) ----
+def places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
     url = (
-        "https://maps.googleapis.com/maps/api/place/textsearch/json"
-        f"?query={query}&location={user_lat},{user_lng}&radius=30000"
-        f"&region=SY&language=ar&key={GOOGLE_MAPS_API_KEY}"
+        "https://maps.googleapis.com/maps/api/place/autocomplete/json"
+        f"?input={query}"
+        f"&key={GOOGLE_MAPS_API_KEY}"
+        f"&language=ar"
+        f"&components=country:sy"
+        f"&location={user_lat},{user_lng}"
+        f"&radius=5000"
     )
     data = requests.get(url).json()
     results = []
-    if data["status"] == "OK" and data["results"]:
-        for res in data["results"]:
-            loc = res["geometry"]["location"]
-            dist = haversine(user_lat, user_lng, loc["lat"], loc["lng"])
+    if data.get("status") == "OK" and data.get("predictions"):
+        for e in data["predictions"][:max_results]:
             results.append({
-                "name": res.get("name"),
-                "address": res.get("formatted_address"),
-                "lat": loc["lat"],
-                "lng": loc["lng"],
-                "distance": round(dist, 2)
+                "description": e.get("description"),
+                "place_id": e.get("place_id"),
             })
-        results.sort(key=lambda x: x['distance'])
-        return results[:max_results]
-    return None
+        return results
+    return []
+
+# ---- Place Details ----
+def get_place_details(place_id: str) -> dict:
+    url = (
+        "https://maps.googleapis.com/maps/api/place/details/json"
+        f"?place_id={place_id}"
+        f"&key={GOOGLE_MAPS_API_KEY}"
+        f"&language=ar"
+    )
+    data = requests.get(url).json()
+    if data.get("status") == "OK" and data.get("result"):
+        result = data["result"]
+        loc = result["geometry"]["location"]
+        return {
+            "address": result.get("formatted_address"),
+            "lat": loc["lat"],
+            "lng": loc["lng"],
+        }
+    return {}
 
 # ---- دالة الحجز الوهمية ----
 def create_mock_booking(pickup, destination, time, car_type, audio_pref, user_id=None):
@@ -155,31 +173,25 @@ def chatbot(req: UserRequest):
     user_msg = (req.userInput or "").strip()
     step = sess.get("step", "ask_destination")
 
-    # -------- الخطوة 1: طلب الوجهة --------
+    # -------- الخطوة 1: طلب الوجهة (Autocomplete) --------
     if step == "ask_destination":
-        places = places_search(user_msg, sess["lat"], sess["lng"])
+        places = places_autocomplete(user_msg, sess["lat"], sess["lng"])
         if not places:
-            coords = geocode(user_msg)
-            if coords:
-                address = reverse_geocode(coords["lat"], coords["lng"]) or user_msg
-                sess["chosen_place"] = {"name": user_msg, "address": address, "lat": coords["lat"], "lng": coords["lng"], "distance": haversine(sess["lat"], sess["lng"], coords["lat"], coords["lng"])}
-                sess["step"] = "confirm_destination"
-                return BotResponse(sessionId=req.sessionId, botMessage=f"تم تحديد الوجهة: {address}\nهل تريد المتابعة؟", done=False)
-            else:
-                return BotResponse(sessionId=req.sessionId, botMessage="لم أستطع تحديد الموقع، حاول كتابة اسم أوضح.", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage="لم أجد أماكن مطابقة، حاول كتابة اسم أوضح.", done=False)
         if len(places) > 1:
             sess["step"] = "choose_destination"
             sess["possible_places"] = places
-            options = "\n".join([f"{i+1}. {p['name']} - {p['address']} (يبعد {p['distance']} كم)" for i, p in enumerate(places)])
+            options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
             return BotResponse(
                 sessionId=req.sessionId,
                 botMessage=f"وجدت أكثر من مكان:\n{options}\nيرجى اختيار رقم المكان الصحيح.",
                 done=False
             )
         else:
-            sess["chosen_place"] = places[0]
+            place_info = get_place_details(places[0]['place_id'])
+            sess["chosen_place"] = place_info
             sess["step"] = "confirm_destination"
-            return BotResponse(sessionId=req.sessionId, botMessage=f"تم تحديد الوجهة: {places[0]['name']} - {places[0]['address']}\nهل تريد المتابعة؟", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage=f"تم تحديد الوجهة: {place_info['address']}\nهل تريد المتابعة؟", done=False)
 
     # -------- الخطوة 2: اختيار الوجهة من القائمة --------
     if step == "choose_destination":
@@ -190,9 +202,11 @@ def chatbot(req: UserRequest):
             return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم صحيح.", done=False)
         places = sess.get("possible_places", [])
         if 0 <= idx < len(places):
-            sess["chosen_place"] = places[idx]
+            place_id = places[idx]['place_id']
+            place_info = get_place_details(place_id)
+            sess["chosen_place"] = place_info
             sess["step"] = "confirm_destination"
-            return BotResponse(sessionId=req.sessionId, botMessage=f"تم اختيار: {places[idx]['name']} - {places[idx]['address']}\nهل تريد المتابعة؟", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage=f"تم تحديد الوجهة: {place_info['address']}\nهل تريد المتابعة؟", done=False)
         else:
             return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم صحيح.", done=False)
 
@@ -202,7 +216,7 @@ def chatbot(req: UserRequest):
             sess["step"] = "ask_pickup"
             return BotResponse(
                 sessionId=req.sessionId,
-                botMessage=f"✔️ تم اختيار الوجهة: {sess['chosen_place']['name']} - {sess['chosen_place']['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
+                botMessage=f"✔️ تم اختيار الوجهة: {sess['chosen_place']['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
                 done=False
             )
         else:
@@ -243,7 +257,7 @@ def chatbot(req: UserRequest):
             sessionId=req.sessionId,
             botMessage=(
                 "ملخص رحلتك:\n"
-                f"• الوجهة: {sess['chosen_place']['name']} - {sess['chosen_place']['address']}\n"
+                f"• الوجهة: {sess['chosen_place']['address']}\n"
                 f"• الانطلاق: {sess['pickup']}\n"
                 f"• الوقت: {sess['time']}\n"
                 f"• نوع السيارة: {sess['car']}\n"
@@ -258,7 +272,7 @@ def chatbot(req: UserRequest):
         if user_msg.lower() in ["نعم", "أجل", "أكيد", "موافق", "yes"]:
             booking_id = create_mock_booking(
                 sess["pickup"],
-                f"{sess['chosen_place']['name']} - {sess['chosen_place']['address']}",
+                sess["chosen_place"]["address"],
                 sess["time"],
                 sess["car"],
                 sess["audio"],
