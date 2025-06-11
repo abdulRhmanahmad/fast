@@ -1,7 +1,8 @@
-import os, uuid, requests, math, random
+import os, uuid, requests, math, random, re
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI
 from pydantic import BaseModel
+import difflib
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
@@ -55,7 +56,161 @@ def format_address(address: str) -> str:
         result += ("، " if street else "") + city
     return result if result else parts[0]
 
-def get_location_text(lat, lng):
+# ---- NLP Helper Functions ----
+def clean_arabic_text(text: str) -> str:
+    """تنظيف النص العربي وإزالة الكلمات غير المفيدة"""
+    # إزالة علامات الترقيم والرموز
+    text = re.sub(r'[^\w\s]', ' ', text)
+    # توحيد المسافات
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # كلمات يجب إزالتها (stop words)
+    stop_words = [
+        'من', 'إلى', 'في', 'على', 'عند', 'بدي', 'أريد', 'أروح', 
+        'أذهب', 'بدك', 'تريد', 'تروح', 'تذهب', 'الى', 'انا', 'أنا'
+    ]
+    
+    words = text.split()
+    filtered_words = [word for word in words if word not in stop_words]
+    return ' '.join(filtered_words)
+
+def expand_location_query(query: str) -> List[str]:
+    """توسيع البحث لتشمل أشكال مختلفة من الاستعلام"""
+    query = clean_arabic_text(query)
+    expanded_queries = [query]
+    
+    # أضافة أشكال مختلفة للبحث
+    if query:
+        # إضافة "شارع" إذا لم يكن موجود
+        if "شارع" not in query and "طريق" not in query:
+            expanded_queries.append(f"شارع {query}")
+            expanded_queries.append(f"{query} شارع")
+        
+        # إضافة أسماء المدن الشائعة
+        syrian_cities = ["دمشق", "حلب", "حمص", "حماة", "اللاذقية", "طرطوس"]
+        for city in syrian_cities:
+            if city not in query:
+                expanded_queries.append(f"{query} {city}")
+                expanded_queries.append(f"{query}, {city}")
+        
+        # إضافة تنويعات للأحياء الشائعة
+        if "شعلان" in query.lower():
+            expanded_queries.extend([
+                "الشعلان دمشق",
+                "شارع الشعلان",
+                "حي الشعلان",
+                "منطقة الشعلان"
+            ])
+        
+        # معالجة الأخطاء الإملائية الشائعة
+        common_corrections = {
+            "شعلان": ["الشعلان", "شارع الشعلان"],
+            "مزه": ["المزة", "حي المزة"],
+            "جسر": ["الجسر الأبيض", "جسر فيكتوريا"],
+            "ساحة": ["ساحة الأمويين", "ساحة المحافظة"],
+        }
+        
+        for mistake, corrections in common_corrections.items():
+            if mistake in query.lower():
+                expanded_queries.extend(corrections)
+    
+    return list(set(expanded_queries))  # إزالة التكرار
+
+def smart_places_search(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
+    """بحث ذكي عن الأماكن مع معالجة NLP"""
+    expanded_queries = expand_location_query(query)
+    all_results = []
+    
+    # البحث بكل الاستعلامات الموسعة
+    for search_query in expanded_queries:
+        results = places_autocomplete(search_query, user_lat, user_lng, max_results)
+        all_results.extend(results)
+        
+        # إذا وجدنا نتائج جيدة، توقف
+        if len(results) >= 3:
+            break
+    
+    # إزالة التكرار بناءً على place_id
+    unique_results = []
+    seen_ids = set()
+    for result in all_results:
+        if result['place_id'] not in seen_ids:
+            unique_results.append(result)
+            seen_ids.add(result['place_id'])
+    
+    # إذا لم نجد شيء، جرب بحث تقريبي
+    if not unique_results:
+        unique_results = fuzzy_location_search(query, user_lat, user_lng)
+    
+    return unique_results[:max_results]
+
+def fuzzy_location_search(query: str, user_lat: float, user_lng: float) -> list:
+    """بحث تقريبي للأماكن المعروفة"""
+    # قاعدة بيانات محلية للأماكن الشائعة في سوريا
+    known_places = {
+        "الشعلان": "الشعلان، دمشق، سوريا",
+        "شعلان": "الشعلان، دمشق، سوريا", 
+        "المزة": "المزة، دمشق، سوريا",
+        "مزه": "المزة، دمشق، سوريا",
+        "الحمدانية": "الحمدانية، حلب، سوريا",
+        "حمدانية": "الحمدانية، حلب، سوريا",
+        "صلاح الدين": "صلاح الدين، حلب، سوريا",
+        "الأزبكية": "الأزبكية، حلب، سوريا",
+        "أزبكية": "الأزبكية، حلب، سوريا",
+        "كفرسوسة": "كفرسوسة، دمشق، سوريا",
+        "جرمانا": "جرمانا، ريف دمشق، سوريا",
+        "دوما": "دوما، ريف دمشق، سوريا",
+        "حرستا": "حرستا، ريف دمشق، سوريا",
+        "معضمية": "المعضمية، ريف دمشق، سوريا",
+        "التل": "التل، ريف دمشق، سوريا",
+        "صحنايا": "صحنايا، ريف دمشق، سوريا"
+    }
+    
+    query_clean = clean_arabic_text(query.lower())
+    
+    # بحث مباشر
+    for key, value in known_places.items():
+        if key.lower() in query_clean or query_clean in key.lower():
+            return [{
+                "description": value,
+                "place_id": f"local_{key}",
+                "is_local": True
+            }]
+    
+    # بحث تقريبي باستخدام difflib
+    matches = difflib.get_close_matches(query_clean, known_places.keys(), n=3, cutoff=0.6)
+    results = []
+    for match in matches:
+        results.append({
+            "description": known_places[match],
+            "place_id": f"local_{match}",
+            "is_local": True
+        })
+    
+    return results
+
+def get_place_details_enhanced(place_id: str) -> dict:
+    """الحصول على تفاصيل المكان مع دعم الأماكن المحلية"""
+    if place_id.startswith("local_"):
+        # معالجة الأماكن المحلية
+        location_name = place_id.replace("local_", "")
+        # يمكنك إضافة إحداثيات تقريبية للأماكن المعروفة
+        local_coordinates = {
+            "الشعلان": {"lat": 33.5138, "lng": 36.2765},
+            "شعلان": {"lat": 33.5138, "lng": 36.2765},
+            "المزة": {"lat": 33.5024, "lng": 36.2213},
+            "مزه": {"lat": 33.5024, "lng": 36.2213},
+            # يمكن إضافة المزيد
+        }
+        
+        coords = local_coordinates.get(location_name, {"lat": 33.5138, "lng": 36.2765})
+        return {
+            "address": f"{location_name}، دمشق، سوريا",
+            "lat": coords["lat"],
+            "lng": coords["lng"],
+        }
+    else:
+        return get_place_details(place_id)
     address = reverse_geocode(lat, lng)
     if not address:
         return "موقعك غير معروف"
@@ -176,9 +331,14 @@ def chatbot(req: UserRequest):
 
     # -------- الخطوة 1: البحث عن الوجهة --------
     if step == "ask_destination":
-        places = places_autocomplete(user_msg, sess["lat"], sess["lng"])
+        places = smart_places_search(user_msg, sess["lat"], sess["lng"])
         if not places:
-            return BotResponse(sessionId=req.sessionId, botMessage="لم أجد أماكن مطابقة، حاول كتابة اسم أوضح.", done=False)
+            # إذا لم نجد شيء، نعطي اقتراحات مفيدة
+            return BotResponse(
+                sessionId=req.sessionId, 
+                botMessage="لم أتمكن من العثور على هذا المكان. هل يمكنك المحاولة مرة أخرى؟\n\nأمثلة: 'الشعلان'، 'المزة'، 'شارع الحمدانية'، 'ساحة الأمويين'", 
+                done=False
+            )
         if len(places) > 1:
             sess["step"] = "choose_destination"
             sess["possible_places"] = places
@@ -189,7 +349,10 @@ def chatbot(req: UserRequest):
                 done=False
             )
         else:
-            place_info = get_place_details(places[0]['place_id'])
+            if places[0].get('is_local'):
+                place_info = get_place_details_enhanced(places[0]['place_id'])
+            else:
+                place_info = get_place_details(places[0]['place_id'])
             sess["chosen_place"] = place_info
             sess["step"] = "ask_pickup"
             return BotResponse(
@@ -208,8 +371,10 @@ def chatbot(req: UserRequest):
         try:
             idx = int(user_reply) - 1
             if 0 <= idx < len(places):
-                place_id = places[idx]['place_id']
-                place_info = get_place_details(place_id)
+                if places[idx].get('is_local'):
+                    place_info = get_place_details_enhanced(places[idx]['place_id'])
+                else:
+                    place_info = get_place_details(places[idx]['place_id'])
                 sess["chosen_place"] = place_info
                 sess["step"] = "ask_pickup"
                 found = True
@@ -219,8 +384,10 @@ def chatbot(req: UserRequest):
         if not found:
             for i, p in enumerate(places):
                 if user_reply in (p['description'] or '').lower():
-                    place_id = p['place_id']
-                    place_info = get_place_details(place_id)
+                    if p.get('is_local'):
+                        place_info = get_place_details_enhanced(p['place_id'])
+                    else:
+                        place_info = get_place_details(p['place_id'])
                     sess["chosen_place"] = place_info
                     sess["step"] = "ask_pickup"
                     found = True
@@ -242,9 +409,13 @@ def chatbot(req: UserRequest):
             sess["step"] = "ask_time"
             return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
         else:
-            places = places_autocomplete(user_msg, sess["lat"], sess["lng"])
+            places = smart_places_search(user_msg, sess["lat"], sess["lng"])
             if not places:
-                return BotResponse(sessionId=req.sessionId, botMessage="لم أجد أماكن مطابقة، حاول كتابة اسم أوضح لنقطة الانطلاق.", done=False)
+                return BotResponse(
+                    sessionId=req.sessionId, 
+                    botMessage="لم أتمكن من العثور على هذا المكان كنقطة انطلاق. هل يمكنك المحاولة مرة أخرى؟\n\nأمثلة: 'الشعلان'، 'المزة'، 'شارع الحمدانية'", 
+                    done=False
+                )
             if len(places) > 1:
                 sess["step"] = "choose_pickup"
                 sess["possible_pickup_places"] = places
@@ -255,7 +426,10 @@ def chatbot(req: UserRequest):
                     done=False
                 )
             else:
-                place_info = get_place_details(places[0]['place_id'])
+                if places[0].get('is_local'):
+                    place_info = get_place_details_enhanced(places[0]['place_id'])
+                else:
+                    place_info = get_place_details(places[0]['place_id'])
                 sess["pickup"] = place_info['address']
                 sess["step"] = "ask_time"
                 return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
@@ -269,8 +443,10 @@ def chatbot(req: UserRequest):
         try:
             idx = int(user_reply) - 1
             if 0 <= idx < len(places):
-                place_id = places[idx]['place_id']
-                place_info = get_place_details(place_id)
+                if places[idx].get('is_local'):
+                    place_info = get_place_details_enhanced(places[idx]['place_id'])
+                else:
+                    place_info = get_place_details(places[idx]['place_id'])
                 sess["pickup"] = place_info['address']
                 sess["step"] = "ask_time"
                 found = True
@@ -280,8 +456,10 @@ def chatbot(req: UserRequest):
         if not found:
             for i, p in enumerate(places):
                 if user_reply in (p['description'] or '').lower():
-                    place_id = p['place_id']
-                    place_info = get_place_details(place_id)
+                    if p.get('is_local'):
+                        place_info = get_place_details_enhanced(p['place_id'])
+                    else:
+                        place_info = get_place_details(p['place_id'])
                     sess["pickup"] = place_info['address']
                     sess["step"] = "ask_time"
                     found = True
