@@ -61,7 +61,7 @@ def get_location_text(lat, lng):
         return "موقعك غير معروف"
     return format_address(address)
 
-# ---- Places Autocomplete (مطابقة لتطبيقك) ----
+# ---- Places Autocomplete ----
 def places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
     url = (
         "https://maps.googleapis.com/maps/api/place/autocomplete/json"
@@ -101,7 +101,6 @@ def get_place_details(place_id: str) -> dict:
             "lng": loc["lng"],
         }
     return {}
-
 # ---- دالة الحجز الوهمية ----
 def create_mock_booking(pickup, destination, time, car_type, audio_pref, user_id=None):
     booking_id = random.randint(10000, 99999)
@@ -162,6 +161,7 @@ def chatbot(req: UserRequest):
             "loc_txt": loc_txt,
             "possible_places": None,
             "chosen_place": None,
+            "possible_pickup_places": None,
             "pickup": None,
             "time": None,
             "car": None,
@@ -173,7 +173,7 @@ def chatbot(req: UserRequest):
     user_msg = (req.userInput or "").strip()
     step = sess.get("step", "ask_destination")
 
-    # -------- الخطوة 1: طلب الوجهة (Autocomplete) --------
+    # -------- الخطوة 1: البحث عن الوجهة --------
     if step == "ask_destination":
         places = places_autocomplete(user_msg, sess["lat"], sess["lng"])
         if not places:
@@ -184,113 +184,70 @@ def chatbot(req: UserRequest):
             options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
             return BotResponse(
                 sessionId=req.sessionId,
-                botMessage=f"وجدت أكثر من مكان:\n{options}\nيرجى اختيار رقم المكان الصحيح.",
+                botMessage=f"وجدت أكثر من مكان:\n{options}\nيرجى اختيار رقم أو كتابة اسم المكان الصحيح.",
                 done=False
             )
         else:
             place_info = get_place_details(places[0]['place_id'])
             sess["chosen_place"] = place_info
-            sess["step"] = "confirm_destination"
-            return BotResponse(sessionId=req.sessionId, botMessage=f"تم تحديد الوجهة: {place_info['address']}\nهل تريد المتابعة؟", done=False)
-
-    # -------- الخطوة 2: اختيار الوجهة من القائمة --------
-    if step == "choose_destination":
-        idx = -1
-        try:
-            idx = int(user_msg) - 1
-        except:
-            return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم صحيح.", done=False)
-        places = sess.get("possible_places", [])
-        if 0 <= idx < len(places):
-            place_id = places[idx]['place_id']
-            place_info = get_place_details(place_id)
-            sess["chosen_place"] = place_info
-            sess["step"] = "confirm_destination"
-            return BotResponse(sessionId=req.sessionId, botMessage=f"تم تحديد الوجهة: {place_info['address']}\nهل تريد المتابعة؟", done=False)
-        else:
-            return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم صحيح.", done=False)
-
-    # -------- الخطوة 3: تأكيد الوجهة --------
-    if step == "confirm_destination":
-        if user_msg.strip().lower() in ["نعم", "أجل", "اكيد", "أيوه", "yes", "ok"]:
             sess["step"] = "ask_pickup"
+            return BotResponse(
+                sessionId=req.sessionId,
+                botMessage=f"✔️ تم اختيار الوجهة: {place_info['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
+                done=False
+            )
+
+    # -------- الخطوة 2: اختيار الوجهة من القائمة (اسم أو رقم) --------
+    if step == "choose_destination":
+        places = sess.get("possible_places", [])
+        idx = -1
+        user_reply = user_msg.strip().lower()
+        found = False
+        # إذا رقم
+        try:
+            idx = int(user_reply) - 1
+            if 0 <= idx < len(places):
+                place_id = places[idx]['place_id']
+                place_info = get_place_details(place_id)
+                sess["chosen_place"] = place_info
+                sess["step"] = "ask_pickup"
+                found = True
+        except:
+            pass
+        # إذا نص (يطابق بالوصف)
+        if not found:
+            for i, p in enumerate(places):
+                if user_reply in (p['description'] or '').lower():
+                    place_id = p['place_id']
+                    place_info = get_place_details(place_id)
+                    sess["chosen_place"] = place_info
+                    sess["step"] = "ask_pickup"
+                    found = True
+                    break
+        if found:
             return BotResponse(
                 sessionId=req.sessionId,
                 botMessage=f"✔️ تم اختيار الوجهة: {sess['chosen_place']['address']}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({sess['loc_txt']}) أم من مكان آخر؟",
                 done=False
             )
         else:
-            sess["step"] = "ask_destination"
-            return BotResponse(sessionId=req.sessionId, botMessage="يرجى كتابة اسم الوجهة مرة أخرى.", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم أو كتابة اسم المكان كما في القائمة.", done=False)
 
-    # -------- الخطوة 4: نقطة الانطلاق --------
+    # -------- الخطوة 3: تحديد نقطة الانطلاق --------
     if step == "ask_pickup":
-        if user_msg.lower() in ["موقعي", "موقعي الحالي", "الموقع الحالي"]:
+        user_reply = user_msg.strip().lower()
+        if user_reply in ["موقعي", "موقعي الحالي", "الموقع الحالي"]:
             sess["pickup"] = sess["loc_txt"]
+            sess["step"] = "ask_time"
+            return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
         else:
-            coords = geocode(user_msg)
-            if coords:
-                pickup_addr = reverse_geocode(coords["lat"], coords["lng"]) or user_msg
-                sess["pickup"] = pickup_addr
-            else:
-                return BotResponse(sessionId=req.sessionId, botMessage="تعذر تحديد نقطة الانطلاق. أكتب اسم أوضح أو أقرب شارع.", done=False)
-        sess["step"] = "ask_time"
-        return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
-
-    # -------- الخطوة 5: وقت الانطلاق --------
-    if step == "ask_time":
-        sess["time"] = user_msg
-        sess["step"] = "ask_car"
-        return BotResponse(sessionId=req.sessionId, botMessage="أي نوع سيارة تفضل؟ عادية أم VIP؟", done=False)
-
-    # -------- الخطوة 6: نوع السيارة --------
-    if step == "ask_car":
-        sess["car"] = user_msg
-        sess["step"] = "ask_audio"
-        return BotResponse(sessionId=req.sessionId, botMessage="هل تود الاستماع لشيء أثناء الرحلة؟ (قرآن، موسيقى، صمت)", done=False)
-
-    # -------- الخطوة 7: الصوت --------
-    if step == "ask_audio":
-        sess["audio"] = user_msg
-        sess["step"] = "summary"
-        return BotResponse(
-            sessionId=req.sessionId,
-            botMessage=(
-                "ملخص رحلتك:\n"
-                f"• الوجهة: {sess['chosen_place']['address']}\n"
-                f"• الانطلاق: {sess['pickup']}\n"
-                f"• الوقت: {sess['time']}\n"
-                f"• نوع السيارة: {sess['car']}\n"
-                f"• الصوت: {sess['audio']}\n\n"
-                "هل تؤكد الحجز؟"
-            ),
-            done=False
-        )
-
-    # -------- الخطوة 8: التأكيد النهائي (هنا الحجز الفعلي) --------
-    if step == "summary":
-        if user_msg.lower() in ["نعم", "أجل", "أكيد", "موافق", "yes"]:
-            booking_id = create_mock_booking(
-                sess["pickup"],
-                sess["chosen_place"]["address"],
-                sess["time"],
-                sess["car"],
-                sess["audio"],
-                user_id=None
-            )
-            sess["step"] = "confirmed"
-            return BotResponse(
-                sessionId=req.sessionId,
-                botMessage=f"✔️ تم تأكيد حجزك بنجاح! رقم الطلب: {booking_id}\nسيصلك السائق في الوقت المحدد.",
-                done=True
-            )
-        else:
-            sess["step"] = "ask_destination"
-            return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز. اكتب الوجهة من جديد.", done=True)
-
-    # -------- الخطوة 9: انتهاء الجلسة --------
-    if step == "confirmed":
-        return BotResponse(sessionId=req.sessionId, botMessage="بإمكانك بدء حجز جديد بكتابة الوجهة.", done=True)
-
-    # -------- fallback --------
-    return BotResponse(sessionId=req.sessionId, botMessage="حدث خطأ غير متوقع، حاول مجدداً.", done=False)
+            places = places_autocomplete(user_msg, sess["lat"], sess["lng"])
+            if not places:
+                return BotResponse(sessionId=req.sessionId, botMessage="لم أجد أماكن مطابقة، حاول كتابة اسم أوضح لنقطة الانطلاق.", done=False)
+            if len(places) > 1:
+                sess["step"] = "choose_pickup"
+                sess["possible_pickup_places"] = places
+                options = "\n".join([f"{i+1}. {p['description']}" for i, p in enumerate(places)])
+                return BotResponse(
+                    sessionId=req.sessionId,
+                    botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nيرجى اختيار رقم أو كتابة    
