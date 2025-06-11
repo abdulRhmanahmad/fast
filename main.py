@@ -1,12 +1,14 @@
-import os, uuid, requests, math, random, re 
+import os, uuid, requests, math, random, re, difflib
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI
 from pydantic import BaseModel
-import difflib
+
+from openai import OpenAI
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
+client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -245,6 +247,79 @@ class BotResponse(BaseModel):
     botMessage: str
     done: bool = False
 
+# جمل متنوّعة للخطوات (تظهر عشوائياً)
+step_messages = {
+    "ask_destination": [
+        "أين حابب تروح اليوم؟ 🚕",
+        "حددلي وجهتك لو سمحت.",
+        "شو عنوان المكان يلي رايح عليه؟",
+        "خبرني وين وجهتك؟",
+        "وين بدك أوصلك اليوم؟"
+    ],
+    "ask_pickup": [
+        "من وين نوصلك؟ من موقعك الحالي ولا في نقطة ثانية؟",
+        "اختر نقطة الانطلاق: موقعك الحالي أو مكان آخر.",
+        "حابب أجيك ععنوانك الحالي ولا حابب تغير؟",
+        "حددلي من وين حابب تبدأ الرحلة."
+    ],
+    "ask_time": [
+        "وقت الرحلة متى تفضّل؟ الآن ولا بتوقيت محدد؟",
+        "تحب ننطلق فوراً ولا تحدد وقت لاحق؟",
+        "خبرني متى الوقت المناسب للانطلاق."
+    ],
+    "ask_car_type": [
+        "أي نوع سيارة بدك؟ عادية ولا VIP؟",
+        "تفضّل سيارة عادية ولا بدك تجربة فاخرة (VIP)؟",
+        "خبرني نوع السيارة: عادية أم VIP؟"
+    ],
+    "ask_audio": [
+        "تحب نسمع شي أثناء الرحلة؟ قرآن، موسيقى، أو تفضّل الصمت؟",
+        "اختر نوع الصوت: قرآن، موسيقى، أم بلا صوت.",
+        "حابب نضيف لمسة موسيقية أو تحب الجو هادي؟"
+    ],
+    "confirm_booking": [
+        "راجع ملخص الطلب وأكد إذا كل شي تمام 👇",
+        "هذي تفاصيل رحلتك! إذا في شي مو واضح صححلي، أو أكد الحجز.",
+        "قبل نأكد الحجز، شوف التفاصيل بالأسفل."
+    ]
+}
+
+def random_step_message(step):
+    msgs = step_messages.get(step, ["كيف أقدر أخدمك؟"])
+    return random.choice(msgs)
+
+def ask_gpt(message):
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "أجب بشكل ودود ومختصر. إذا الموضوع خارج حجز التاكسي، جاوب بلطف ثم ذكر المستخدم أنه بإمكانه حجز مشوار."},
+            {"role": "user", "content": message}
+        ],
+        max_tokens=60,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
+
+def is_out_of_booking_context(user_msg, step):
+    general_words = [
+        "كيفك", "شلونك", "السلام عليكم", "مرحبا", "هاي", "من أنت", "مين أنت",
+        "شو بتسوي", "شو في", "كيف الجو", "شو أخبارك", "شخبارك", "وينك", "شكرا", "يسلمو",
+        "ثانكس", "thanks", "thx", "good", "nice", "help", "مساعدة"
+    ]
+    msg = user_msg.strip().lower()
+    if any(word in msg for word in general_words):
+        return True
+    # جواب قصير وغير متوقع ضمن الخطوة
+    if step in ["ask_destination", "ask_pickup"] and len(msg) < 5:
+        return True
+    return False
+
+def current_step_question(sess):
+    step = sess.get('step', '')
+    if step in step_messages:
+        return random_step_message(step)
+    return "كيف أقدر أخدمك؟"
+
 ASSISTANT_PROMPT = """
 أنت مساعد صوتي ذكي اسمك "يا هو" داخل تطبيق تاكسي متطور. مهمتك مساعدة المستخدمين في حجز المشاوير بطريقة سهلة وودودة.
 - استخدم نفس لغة المستخدم في كل رد (عربي أو إنجليزي)
@@ -274,7 +349,7 @@ def chatbot(req: UserRequest):
                 "step": "ask_destination",
                 "history": [
                     {"role": "system", "content": ASSISTANT_PROMPT},
-                    {"role": "assistant", "content": "مرحباً! أنا يا هو، مساعدك الذكي للمشاوير. أين تود الذهاب اليوم؟ 🚖"}
+                    {"role": "assistant", "content": random_step_message("ask_destination")}
                 ],
                 "loc_txt": loc_txt,
                 "possible_places": None,
@@ -285,18 +360,32 @@ def chatbot(req: UserRequest):
                 "car": None,
                 "audio": None
             }
-            return BotResponse(sessionId=sess_id, botMessage="مرحباً! أنا يا هو، مساعدك الذكي للمشاوير. أين تود الذهاب اليوم؟ 🚖")
+            return BotResponse(sessionId=sess_id, botMessage=random_step_message("ask_destination"))
 
         sess = sessions[req.sessionId]
         user_msg = (req.userInput or "").strip()
         step = sess.get("step", "ask_destination")
 
+        # منطق ChatGPT للردود العامة خارج سيناريو الحجز
+        if is_out_of_booking_context(user_msg, step):
+            gpt_reply = ask_gpt(user_msg)
+            step_q = current_step_question(sess)
+            return BotResponse(
+                sessionId=req.sessionId,
+                botMessage=f"{gpt_reply}\n\n{step_q}",
+                done=False
+            )
+
+        # ... باقي منطق الحجز بدون تغيير (كما هو في كودك) ...
+        # يمكنك نسخ باقي السيناريو (كما كتبتَه سابقاً) ووضعه بعد هذا البلوك.
+
+        # ---- بقية منطق الحجز تبعك تماماً ----
         if step == "ask_destination":
             places = smart_places_search(user_msg, sess["lat"], sess["lng"])
             if not places:
                 return BotResponse(
-                    sessionId=req.sessionId, 
-                    botMessage="لم أتمكن من العثور على هذا المكان. هل يمكنك المحاولة مرة أخرى؟\n\nأمثلة: 'الشعلان'، 'المزة'، 'شارع الحمدانية'، 'ساحة الأمويين'", 
+                    sessionId=req.sessionId,
+                    botMessage="لم أتمكن من العثور على هذا المكان. جرب مكان آخر أو أعد كتابة العنوان.\nمثال: 'الشعلان'، 'المزة'، 'ساحة الأمويين'",
                     done=False
                 )
             if len(places) > 1:
@@ -305,7 +394,7 @@ def chatbot(req: UserRequest):
                 options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(places)])
                 return BotResponse(
                     sessionId=req.sessionId,
-                    botMessage=f"وجدت أكثر من مكان:\n{options}\nيرجى اختيار رقم أو كتابة اسم المكان الصحيح.",
+                    botMessage=f"وجدت أكثر من مكان:\n{options}\nاختر رقم أو اسم المكان المطلوب.",
                     done=False
                 )
             else:
@@ -317,7 +406,7 @@ def chatbot(req: UserRequest):
                 sess["step"] = "ask_pickup"
                 return BotResponse(
                     sessionId=req.sessionId,
-                    botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({remove_country(sess['loc_txt'])}) أم من مكان آخر؟",
+                    botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}.\n{random_step_message('ask_pickup')}",
                     done=False
                 )
 
@@ -352,7 +441,7 @@ def chatbot(req: UserRequest):
             if found:
                 return BotResponse(
                     sessionId=req.sessionId,
-                    botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}.\nمن أين تود الانطلاق؟ من موقعك الحالي ({remove_country(sess['loc_txt'])}) أم من مكان آخر؟",
+                    botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}.\n{random_step_message('ask_pickup')}",
                     done=False
                 )
             else:
@@ -363,13 +452,13 @@ def chatbot(req: UserRequest):
             if user_reply in ["موقعي", "موقعي الحالي", "الموقع الحالي"]:
                 sess["pickup"] = sess["loc_txt"]
                 sess["step"] = "ask_time"
-                return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
+                return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
             else:
                 places = smart_places_search(user_msg, sess["lat"], sess["lng"])
                 if not places:
                     return BotResponse(
-                        sessionId=req.sessionId, 
-                        botMessage="لم أتمكن من العثور على هذا المكان كنقطة انطلاق. هل يمكنك المحاولة مرة أخرى؟\n\nأمثلة: 'الشعلان'، 'المزة'، 'شارع الحمدانية'", 
+                        sessionId=req.sessionId,
+                        botMessage="لم أتمكن من العثور على هذا المكان كنقطة انطلاق. جرب عنوان آخر.",
                         done=False
                     )
                 if len(places) > 1:
@@ -378,7 +467,7 @@ def chatbot(req: UserRequest):
                     options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(places)])
                     return BotResponse(
                         sessionId=req.sessionId,
-                        botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nيرجى اختيار رقم أو كتابة اسم المكان الصحيح.",
+                        botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nاختر رقم أو اسم المكان.",
                         done=False
                     )
                 else:
@@ -388,7 +477,7 @@ def chatbot(req: UserRequest):
                         place_info = get_place_details(places[0]['place_id'])
                     sess["pickup"] = place_info['address']
                     sess["step"] = "ask_time"
-                    return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
+                    return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
 
         if step == "choose_pickup":
             places = sess.get("possible_pickup_places", [])
@@ -418,7 +507,7 @@ def chatbot(req: UserRequest):
                         found = True
                         break
             if found:
-                return BotResponse(sessionId=req.sessionId, botMessage="متى تود الانطلاق؟ الآن أم في وقت محدد؟", done=False)
+                return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
             else:
                 return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم أو كتابة اسم المكان كما في القائمة.", done=False)
 
@@ -429,7 +518,7 @@ def chatbot(req: UserRequest):
             else:
                 sess["time"] = user_msg.strip()
             sess["step"] = "ask_car_type"
-            return BotResponse(sessionId=req.sessionId, botMessage="أي نوع سيارة تفضل؟ سيارة عادية أم VIP؟", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_car_type"), done=False)
 
         if step == "ask_car_type":
             user_reply = user_msg.strip().lower()
@@ -438,7 +527,7 @@ def chatbot(req: UserRequest):
             else:
                 sess["car"] = "عادية"
             sess["step"] = "ask_audio"
-            return BotResponse(sessionId=req.sessionId, botMessage="ما تفضيلك للصوت أثناء الرحلة؟ قرآن، موسيقى، أم صمت؟", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_audio"), done=False)
 
         if step == "ask_audio":
             user_reply = user_msg.strip().lower()
