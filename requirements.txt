@@ -1,3 +1,4 @@
+pinecone-client
 numpy
 fastapi
 uvicorn
