@@ -10,17 +10,25 @@ from typing import Optional, Dict, Any, List
 from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
+import pinecone
 
+# --- إعداد المفاتيح ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "places-index")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
+index = pinecone.Index(PINECONE_INDEX_NAME)
+
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# List of known places with embeddings
+# --- قائمة fallback ---
 known_places_embedding = {
-    "الجورة": "الجورة، دمشق، سوريا",
+  "الجورة": "الجورة، دمشق، سوريا",
     "العمارة الجوانية": "العمارة الجوانية، دمشق، سوريا",
     "باب توما": "باب توما، دمشق، سوريا",
     "القيمرية": "القيمرية، دمشق، سوريا",
@@ -155,12 +163,7 @@ known_places_embedding = {
     "سوق الجمرك": "سوق الجمرك، دمشق، سوريا"
 }
 
-# Generate embeddings for each known place
-known_place_vectors = {
-    name: client.embeddings.create(model="text-embedding-3-small", input=[name]).data[0].embedding
-    for name in known_places_embedding
-}
-
+# --- Embedding ---
 def get_embedding(text: str) -> list:
     response = client.embeddings.create(
         model="text-embedding-3-small",
@@ -171,7 +174,7 @@ def get_embedding(text: str) -> list:
 def cosine_similarity(vec1: list, vec2: list) -> float:
     return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
 
-# Helpers
+# --- Helpers ---
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -267,13 +270,14 @@ def expand_location_query(query: str) -> List[str]:
                 expanded_queries.extend(corrections)
     return list(set(expanded_queries))
 
+# ===== البحث الذكي بالأماكن - Pinecone Integration =====
 def smart_places_search(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
     expanded_queries = expand_location_query(query)
     all_results = []
     for search_query in expanded_queries:
         results = places_autocomplete(search_query, user_lat, user_lng, max_results)
         all_results.extend(results)
-        if len(results) >= 3:
+        if len(all_results) >= 3:
             break
     unique_results = []
     seen_ids = set()
@@ -281,25 +285,27 @@ def smart_places_search(query: str, user_lat: float, user_lng: float, max_result
         if result['place_id'] not in seen_ids:
             unique_results.append(result)
             seen_ids.add(result['place_id'])
-    if not unique_results:
-        unique_results = fuzzy_location_search(query, user_lat, user_lng)
-        if not unique_results:
-            query_emb = get_embedding(query)
-            best_match = None
-            best_score = 0.0
-            for name, emb in known_place_vectors.items():
-                score = cosine_similarity(query_emb, emb)
-                if score > best_score:
-                    best_score = score
-                    best_match = name
+    if unique_results:
+        return unique_results[:max_results]
 
-            if best_score > 0.75:
-                unique_results = [{
-                    "description": known_places_embedding[best_match],
-                    "place_id": f"embed_{best_match}",
-                    "is_local": True
-                }]
-    return unique_results[:max_results]
+    # لم يتم العثور على نتائج من Google Places، نبحث بـ Pinecone
+    try:
+        emb = get_embedding(query)
+        pinecone_results = index.query(vector=emb, top_k=3, include_metadata=True)
+        pinecone_matches = []
+        for match in pinecone_results.matches:
+            pinecone_matches.append({
+                "description": match.metadata.get("address", ""),
+                "place_id": f"embed_{match.id}",
+                "is_local": True
+            })
+        if pinecone_matches:
+            return pinecone_matches
+    except Exception as e:
+        print("🔴 Pinecone Error:", e)
+
+    # آخر حل: Fuzzy fallback
+    return fuzzy_location_search(query, user_lat, user_lng)
 
 def fuzzy_location_search(query: str, user_lat: float, user_lng: float) -> list:
     query_clean = clean_arabic_text(query.lower())
@@ -722,7 +728,6 @@ def chatbot(req: UserRequest):
                 success_msg = f"""
 🎉 تم تأكيد حجزك بنجاح!
 رقم الحجز: {booking_id}
-api/geocode/json?address={address}&region=SY&language=ar&compone
 📱 ستصلك رسالة تأكيد قريباً
 🚗 السائق في الطريق إليك
 ⏱️ الوقت المتوقع: 5-10 دقائق
