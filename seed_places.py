@@ -8,7 +8,7 @@ import time
 # ================================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "ضع_مفتاح_OpenAI_هنا")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "ضع_مفتاح_Pinecone_هنا")
-PINECONE_ENV = os.getenv("PINECONE_ENV", "gcp-starter")  # مثال: gcp-starter أو us-east4-gcp
+PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1")  # مثال: gcp-starter أو us-east4-gcp
 
 # ================================
 # 🔗 ربط OpenAI و Pinecone
