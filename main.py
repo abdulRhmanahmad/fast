@@ -1,6 +1,3 @@
-طيب هلا ضفت شات بوت ذكي ع تطبيق .. ف بدي وين وقت يقلو نوع سيارات يتم استخدام api  نفسو الي مستخدم داخل تطبيق 
-هلا رح ابعتلك رابط سيرفر api  , و استخدامو في فلاتر  .. قبل ما تعمل شي قلي شو فهمت  و بعدها باكدلك موضوع 
-
 
 import os, uuid, requests, math, random, re, difflib
 from typing import Optional, Dict, Any, List
