@@ -341,7 +341,7 @@ def smart_places_search(query: str, user_lat: float, user_lng: float, max_result
             }]
     return unique_results[:max_results]
 
-ddef places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
+def places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
     url = (
         "https://maps.googleapis.com/maps/api/place/autocomplete/json"
         f"?input={query}"
