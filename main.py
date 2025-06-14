@@ -10,25 +10,41 @@ from typing import Optional, Dict, Any, List
 from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
-import pinecone
 
-# --- إعداد المفاتيح ---
+# ------------------------ PINECONE ------------------------
+from pinecone import Pinecone, ServerlessSpec
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
 PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1")
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "places-index")
 
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index_name = "places-index"
+
+# إنشاء الفهرس لو مو موجود
+if index_name not in pc.list_indexes().names():
+    pc.create_index(
+        name=index_name,
+        dimension=1536,  # لازم نفس أبعاد embedding
+        metric="cosine",
+        spec=ServerlessSpec(
+            cloud="aws",
+            region=PINECONE_ENV
+        )
+    )
+
+pinecone_index = pc.Index(index_name)
+
+# ------------------- OPENAI & FASTAPI ---------------------
 client = OpenAI(api_key=OPENAI_API_KEY)
-pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
-index = pinecone.Index(PINECONE_INDEX_NAME)
-
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# --- قائمة fallback ---
+# -------------- الأماكن المعرفة محلياً -------------
+# لو عندك أماكن كثيرة، استوردها من ملف seed_places.py
 known_places_embedding = {
-  "الجورة": "الجورة، دمشق، سوريا",
+"الجورة": "الجورة، دمشق، سوريا",
     "العمارة الجوانية": "العمارة الجوانية، دمشق، سوريا",
     "باب توما": "باب توما، دمشق، سوريا",
     "القيمرية": "القيمرية، دمشق، سوريا",
@@ -163,18 +179,33 @@ known_places_embedding = {
     "سوق الجمرك": "سوق الجمرك، دمشق، سوريا"
 }
 
-# --- Embedding ---
+# ----------- توليد embeddings للأماكن المحلية فقط ------------
+known_place_vectors = {
+    name: client.embeddings.create(model="text-embedding-3-small", input=[name]).data[0].embedding
+    for name in known_places_embedding
+}
+
+# --------- وظيفة إضافة أماكن إلى Pinecone (تشغيلها مره واحدة فقط إذا حبيت تعتمد البحث السريع) ---------
+def seed_places_to_pinecone():
+    for name, address in known_places_embedding.items():
+        emb = client.embeddings.create(model="text-embedding-3-small", input=[name]).data[0].embedding
+        pinecone_index.upsert(vectors=[(
+            str(uuid.uuid4()),
+            emb,
+            {"name": name, "address": address}
+        )])
+# شغلها مرة واحدة فقط (أول ما تنشئ الفهرس)، ثم علقها أو احذفها
+# seed_places_to_pinecone()
+
+# ============= Helpers & Core Functions =================
+
 def get_embedding(text: str) -> list:
-    response = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=[text]
-    )
+    response = client.embeddings.create(model="text-embedding-3-small", input=[text])
     return response.data[0].embedding
 
 def cosine_similarity(vec1: list, vec2: list) -> float:
     return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
 
-# --- Helpers ---
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -231,7 +262,6 @@ def get_location_text(lat, lng):
         return "موقعك الحالي"
     return format_address(address)
 
-# NLP Helpers
 def clean_arabic_text(text: str) -> str:
     text = re.sub(r'[^\w\s]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
@@ -252,32 +282,40 @@ def expand_location_query(query: str) -> List[str]:
             expanded_queries.append(f"{query} شارع")
         expanded_queries.append(f"{query} دمشق")
         expanded_queries.append(f"{query}, دمشق")
-        if "شعلان" in query.lower():
-            expanded_queries.extend([
-                "الشعلان دمشق",
-                "شارع الشعلان",
-                "حي الشعلان",
-                "منطقة الشعلان"
-            ])
-        common_corrections = {
-            "شعلان": ["الشعلان", "شارع الشعلان"],
-            "مزه": ["المزة", "حي المزة"],
-            "جسر": ["الجسر الأبيض", "جسر فيكتوريا"],
-            "ساحة": ["ساحة الأمويين", "ساحة المحافظة"],
-        }
-        for mistake, corrections in common_corrections.items():
-            if mistake in query.lower():
-                expanded_queries.extend(corrections)
     return list(set(expanded_queries))
 
-# ===== البحث الذكي بالأماكن - Pinecone Integration =====
+# --------- بحث Pinecone: استخدمه بدل/مع smart_places_search حسب رغبتك -----------
+def search_places_with_pinecone(query):
+    emb = get_embedding(query)
+    results = pinecone_index.query(
+        vector=emb,
+        top_k=3,
+        include_metadata=True
+    )
+    if results and results.matches:
+        matches = []
+        for match in results.matches:
+            mdata = match['metadata']
+            matches.append({
+                "description": mdata["address"],
+                "place_id": f"pinecone_{mdata['name']}",
+                "is_pinecone": True,
+            })
+        return matches
+    return []
+
 def smart_places_search(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
+    # جرب البحث في Pinecone أولاً
+    pinecone_results = search_places_with_pinecone(query)
+    if pinecone_results:
+        return pinecone_results
+    # باقي البحث المحلي أو Google Places API
     expanded_queries = expand_location_query(query)
     all_results = []
     for search_query in expanded_queries:
         results = places_autocomplete(search_query, user_lat, user_lng, max_results)
         all_results.extend(results)
-        if len(all_results) >= 3:
+        if len(results) >= 3:
             break
     unique_results = []
     seen_ids = set()
@@ -285,57 +323,23 @@ def smart_places_search(query: str, user_lat: float, user_lng: float, max_result
         if result['place_id'] not in seen_ids:
             unique_results.append(result)
             seen_ids.add(result['place_id'])
-    if unique_results:
-        return unique_results[:max_results]
-
-    # لم يتم العثور على نتائج من Google Places، نبحث بـ Pinecone
-    try:
-        emb = get_embedding(query)
-        pinecone_results = index.query(vector=emb, top_k=3, include_metadata=True)
-        pinecone_matches = []
-        for match in pinecone_results.matches:
-            pinecone_matches.append({
-                "description": match.metadata.get("address", ""),
-                "place_id": f"embed_{match.id}",
-                "is_local": True
-            })
-        if pinecone_matches:
-            return pinecone_matches
-    except Exception as e:
-        print("🔴 Pinecone Error:", e)
-
-    # آخر حل: Fuzzy fallback
-    return fuzzy_location_search(query, user_lat, user_lng)
-
-def fuzzy_location_search(query: str, user_lat: float, user_lng: float) -> list:
-    query_clean = clean_arabic_text(query.lower())
-    for key, value in known_places_embedding.items():
-        if key.lower() in query_clean or query_clean in key.lower():
-            return [{
-                "description": value,
-                "place_id": f"local_{key}",
+    if not unique_results:
+        # بحث embedding محلي
+        query_emb = get_embedding(query)
+        best_match = None
+        best_score = 0.0
+        for name, emb in known_place_vectors.items():
+            score = cosine_similarity(query_emb, emb)
+            if score > best_score:
+                best_score = score
+                best_match = name
+        if best_score > 0.75:
+            unique_results = [{
+                "description": known_places_embedding[best_match],
+                "place_id": f"embed_{best_match}",
                 "is_local": True
             }]
-    matches = difflib.get_close_matches(query_clean, known_places_embedding.keys(), n=3, cutoff=0.6)
-    results = []
-    for match in matches:
-        results.append({
-            "description": known_places_embedding[match],
-            "place_id": f"local_{match}",
-            "is_local": True
-        })
-    return results
-
-def get_place_details_enhanced(place_id: str) -> dict:
-    if place_id.startswith("local_") or place_id.startswith("embed_"):
-        location_name = place_id.replace("local_", "").replace("embed_", "")
-        return {
-            "address": known_places_embedding.get(location_name, f"{location_name}، دمشق، سوريا"),
-            "lat": 33.5138,
-            "lng": 36.2765,
-        }
-    else:
-        return get_place_details(place_id)
+    return unique_results[:max_results]
 
 def places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
     url = (
@@ -376,18 +380,25 @@ def get_place_details(place_id: str) -> dict:
         }
     return {}
 
-def create_mock_booking(pickup, destination, time, car_type, audio_pref, user_id=None):
-    booking_id = random.randint(10000, 99999)
-    print({
-        "pickup": pickup,
-        "destination": destination,
-        "time": time,
-        "car_type": car_type,
-        "audio_pref": audio_pref,
-        "user_id": user_id,
-        "booking_id": booking_id,
-    })
-    return booking_id
+def get_place_details_enhanced(place_id: str) -> dict:
+    if place_id.startswith("pinecone_"):
+        name = place_id.replace("pinecone_", "")
+        return {
+            "address": known_places_embedding.get(name, f"{name}، دمشق، سوريا"),
+            "lat": 33.5138,
+            "lng": 36.2765,
+        }
+    if place_id.startswith("embed_") or place_id.startswith("local_"):
+        location_name = place_id.replace("local_", "").replace("embed_", "")
+        return {
+            "address": known_places_embedding.get(location_name, f"{location_name}، دمشق، سوريا"),
+            "lat": 33.5138,
+            "lng": 36.2765,
+        }
+    else:
+        return get_place_details(place_id)
+
+# ============= دورة حياة البوت والتعامل مع الخطوات ==============
 
 class UserRequest(BaseModel):
     sessionId: Optional[str] = None
@@ -486,6 +497,7 @@ ASSISTANT_PROMPT = """
 6. ملخص الطلب والتأكيد
 """
 
+# ============= FastAPI Endpoint ==============
 @app.post("/chatbot", response_model=BotResponse)
 def chatbot(req: UserRequest):
     try:
@@ -544,7 +556,7 @@ def chatbot(req: UserRequest):
                     done=False
                 )
             else:
-                if places[0].get('is_local'):
+                if places[0].get('is_local') or places[0].get('is_pinecone'):
                     place_info = get_place_details_enhanced(places[0]['place_id'])
                 else:
                     place_info = get_place_details(places[0]['place_id'])
@@ -563,7 +575,7 @@ def chatbot(req: UserRequest):
             try:
                 idx = int(user_reply) - 1
                 if 0 <= idx < len(places):
-                    if places[idx].get('is_local'):
+                    if places[idx].get('is_local') or places[idx].get('is_pinecone'):
                         place_info = get_place_details_enhanced(places[idx]['place_id'])
                     else:
                         place_info = get_place_details(places[idx]['place_id'])
@@ -576,7 +588,7 @@ def chatbot(req: UserRequest):
                 new_places = smart_places_search(user_msg, sess["lat"], sess["lng"])
                 if new_places:
                     if len(new_places) == 1:
-                        if new_places[0].get('is_local'):
+                        if new_places[0].get('is_local') or new_places[0].get('is_pinecone'):
                             place_info = get_place_details_enhanced(new_places[0]['place_id'])
                         else:
                             place_info = get_place_details(new_places[0]['place_id'])
@@ -628,7 +640,7 @@ def chatbot(req: UserRequest):
                         done=False
                     )
                 else:
-                    if places[0].get('is_local'):
+                    if places[0].get('is_local') or places[0].get('is_pinecone'):
                         place_info = get_place_details_enhanced(places[0]['place_id'])
                     else:
                         place_info = get_place_details(places[0]['place_id'])
@@ -643,7 +655,7 @@ def chatbot(req: UserRequest):
             try:
                 idx = int(user_reply) - 1
                 if 0 <= idx < len(places):
-                    if places[idx].get('is_local'):
+                    if places[idx].get('is_local') or places[idx].get('is_pinecone'):
                         place_info = get_place_details_enhanced(places[idx]['place_id'])
                     else:
                         place_info = get_place_details(places[idx]['place_id'])
@@ -656,7 +668,7 @@ def chatbot(req: UserRequest):
                 new_places = smart_places_search(user_msg, sess["lat"], sess["lng"])
                 if new_places:
                     if len(new_places) == 1:
-                        if new_places[0].get('is_local'):
+                        if new_places[0].get('is_local') or new_places[0].get('is_pinecone'):
                             place_info = get_place_details_enhanced(new_places[0]['place_id'])
                         else:
                             place_info = get_place_details(new_places[0]['place_id'])
@@ -718,13 +730,7 @@ def chatbot(req: UserRequest):
         if step == "confirm_booking":
             user_reply = user_msg.strip().lower()
             if user_reply in ["نعم", "موافق", "أكد", "تأكيد", "yes", "ok"]:
-                booking_id = create_mock_booking(
-                    pickup=sess['pickup'],
-                    destination=sess['chosen_place']['address'],
-                    time=sess['time'],
-                    car_type=sess['car'],
-                    audio_pref=sess['audio']
-                )
+                booking_id = random.randint(10000, 99999)
                 success_msg = f"""
 🎉 تم تأكيد حجزك بنجاح!
 رقم الحجز: {booking_id}
@@ -743,3 +749,4 @@ def chatbot(req: UserRequest):
     except Exception as e:
         print('خطأ في السيرفر:', e)
         return BotResponse(sessionId=req.sessionId if req.sessionId else '', botMessage="حصل خطأ بالسيرفر. جرب بعد قليل.", done=True)
+
