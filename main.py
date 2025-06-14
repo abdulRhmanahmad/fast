@@ -23,7 +23,8 @@ def haversine(lat1, lng1, lat2, lng2):
     return R * c
 
 def geocode(address: str) -> Optional[Dict[str, float]]:
-    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&region=SY&language=ar&key={GOOGLE_MAPS_API_KEY}"
+    # إضافة حدود جغرافية لمدينة دمشق
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&region=SY&language=ar&components=locality:دمشق&key={GOOGLE_MAPS_API_KEY}"
     data = requests.get(url).json()
     if data["status"] == "OK" and data["results"]:
         loc = data["results"][0]["geometry"]["location"]
@@ -31,7 +32,8 @@ def geocode(address: str) -> Optional[Dict[str, float]]:
     return None
 
 def reverse_geocode(lat: float, lng: float) -> Optional[str]:
-    url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&region=SY&language=ar&key={GOOGLE_MAPS_API_KEY}"
+    # إضافة حدود جغرافية لمدينة دمشق
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&region=SY&language=ar&components=locality:دمشق&key={GOOGLE_MAPS_API_KEY}"
     data = requests.get(url).json()
     if data["status"] == "OK" and data["results"]:
         return data["results"][0]["formatted_address"]
@@ -88,11 +90,9 @@ def expand_location_query(query: str) -> List[str]:
         if "شارع" not in query and "طريق" not in query:
             expanded_queries.append(f"شارع {query}")
             expanded_queries.append(f"{query} شارع")
-        syrian_cities = ["دمشق", "حلب", "حمص", "حماة", "اللاذقية", "طرطوس"]
-        for city in syrian_cities:
-            if city not in query:
-                expanded_queries.append(f"{query} {city}")
-                expanded_queries.append(f"{query}, {city}")
+        # إضافة دمشق تلقائيًا إذا لم يتم تحديد مدينة
+        expanded_queries.append(f"{query} دمشق")
+        expanded_queries.append(f"{query}, دمشق")
         if "شعلان" in query.lower():
             expanded_queries.extend([
                 "الشعلان دمشق",
@@ -580,7 +580,7 @@ def chatbot(req: UserRequest):
                 success_msg = f"""
 🎉 تم تأكيد حجزك بنجاح!
 رقم الحجز: {booking_id}
-
+api/geocode/json?address={address}&region=SY&language=ar&compone
 📱 ستصلك رسالة تأكيد قريباً
 🚗 السائق في الطريق إليك
 ⏱️ الوقت المتوقع: 5-10 دقائق
