@@ -1,5 +1,3 @@
-# Let's modify the provided code with the requested changes.
-
 import os
 import uuid
 import requests
@@ -20,7 +18,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# Generate embeddings for each known place
+# List of known places with embeddings
 known_places_embedding = {
     "الجورة": "الجورة، دمشق، سوريا",
     "العمارة الجوانية": "العمارة الجوانية، دمشق، سوريا",
@@ -184,7 +182,6 @@ def haversine(lat1, lng1, lat2, lng2):
     return R * c
 
 def geocode(address: str) -> Optional[Dict[str, float]]:
-    # إضافة حدود جغرافية لمدينة دمشق
     url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&region=SY&language=ar&components=locality:دمشق&key={GOOGLE_MAPS_API_KEY}"
     data = requests.get(url).json()
     if data["status"] == "OK" and data["results"]:
@@ -193,7 +190,6 @@ def geocode(address: str) -> Optional[Dict[str, float]]:
     return None
 
 def reverse_geocode(lat: float, lng: float) -> Optional[str]:
-    # إضافة حدود جغرافية لمدينة دمشق
     url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&region=SY&language=ar&components=locality:دمشق&key={GOOGLE_MAPS_API_KEY}"
     data = requests.get(url).json()
     if data["status"] == "OK" and data["results"]:
@@ -237,7 +233,7 @@ def clean_arabic_text(text: str) -> str:
     text = re.sub(r'[^\w\s]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     stop_words = [
-        'من', 'إلى', 'في', 'على', 'عند', 'بدي', 'أريد', 'أروح', 
+        'من', 'إلى', 'في', 'على', 'عند', 'بدي', 'أريد', 'أروح',
         'أذهب', 'بدك', 'تريد', 'تروح', 'تذهب', 'الى', 'انا', 'أنا'
     ]
     words = text.split()
@@ -251,7 +247,6 @@ def expand_location_query(query: str) -> List[str]:
         if "شارع" not in query and "طريق" not in query:
             expanded_queries.append(f"شارع {query}")
             expanded_queries.append(f"{query} شارع")
-        # إضافة دمشق تلقائيًا إذا لم يتم تحديد مدينة
         expanded_queries.append(f"{query} دمشق")
         expanded_queries.append(f"{query}, دمشق")
         if "شعلان" in query.lower():
@@ -287,10 +282,7 @@ def smart_places_search(query: str, user_lat: float, user_lng: float, max_result
             unique_results.append(result)
             seen_ids.add(result['place_id'])
     if not unique_results:
-        # جرب fuzzy
         unique_results = fuzzy_location_search(query, user_lat, user_lng)
-
-        # إذا فشل حتى fuzzy، جرب Embedding الذكي
         if not unique_results:
             query_emb = get_embedding(query)
             best_match = None
@@ -402,19 +394,18 @@ class BotResponse(BaseModel):
     botMessage: str
     done: bool = False
 
-# رسائل متنوعة
 step_messages = {
     "ask_destination": [
         "مرحباً! أنا يا هو، مساعدك الذكي للمشاوير 🚖.\nوين حابب تروح اليوم؟",
         "هلا فيك! حددلي وجهتك لو سمحت.",
-        "أهلين، شو عنوان المكان اللي رايح عليه؟",
+        "أهلين، شو عنوان المكان الي رايح عليه؟",
         "يسعد مساك! خبرني وين وجهتك اليوم.",
         "وين بدك أوصلك اليوم؟"
     ],
     "ask_pickup": [
-        "من وين نوصلك؟ من موقعك الحالي ولا من نقطة ثانية؟",
+        "من وين نوصلك؟ من موقعك الحالي ولا في نقطة ثانية؟",
         "اختر نقطة الانطلاق: موقعك الحالي أو مكان آخر.",
-        "حابب أجيك على عنوانك الحالي ولا حابب تغير؟",
+        "حابب أجيك ععنوانك الحالي ولا حابب تغير؟",
         "حددلي من وين حابب تبدأ الرحلة."
     ],
     "ask_time": [
@@ -520,7 +511,6 @@ def chatbot(req: UserRequest):
         user_msg = (req.userInput or "").strip()
         step = sess.get("step", "ask_destination")
 
-        # منطق ChatGPT للردود العامة خارج سيناريو الحجز
         if is_out_of_booking_context(user_msg, step):
             gpt_reply = ask_gpt(user_msg)
             step_q = current_step_question(sess)
@@ -530,7 +520,6 @@ def chatbot(req: UserRequest):
                 done=False
             )
 
-        # ---- منطق الحجز ----  
         if step == "ask_destination":
             places = smart_places_search(user_msg, sess["lat"], sess["lng"])
             if not places:
@@ -578,7 +567,6 @@ def chatbot(req: UserRequest):
             except:
                 pass
             if not found:
-                # لو كتب خيار مو ضمن القائمة، رجّع يبحث عنه!
                 new_places = smart_places_search(user_msg, sess["lat"], sess["lng"])
                 if new_places:
                     if len(new_places) == 1:
@@ -659,7 +647,6 @@ def chatbot(req: UserRequest):
             except:
                 pass
             if not found:
-                # لو كتب خيار مو ضمن القائمة، رجع يبحث عنه!
                 new_places = smart_places_search(user_msg, sess["lat"], sess["lng"])
                 if new_places:
                     if len(new_places) == 1:
