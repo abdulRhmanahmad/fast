@@ -341,7 +341,7 @@ def smart_places_search(query: str, user_lat: float, user_lng: float, max_result
             }]
     return unique_results[:max_results]
 
-def places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
+ddef places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
     url = (
         "https://maps.googleapis.com/maps/api/place/autocomplete/json"
         f"?input={query}"
@@ -354,13 +354,17 @@ def places_autocomplete(query: str, user_lat: float, user_lng: float, max_result
     data = requests.get(url).json()
     results = []
     if data.get("status") == "OK" and data.get("predictions"):
-        for e in data["predictions"][:max_results]:
+        for e in data["predictions"][:max_results * 2]:  # جلب أكثر من المطلوب لأنك راح تصفي بعدين
             results.append({
                 "description": e.get("description"),
                 "place_id": e.get("place_id"),
             })
-        return results
-    return []
+    # هنا أضف الفلترة
+    filtered_results = [r for r in results if "دمشق" in r["description"]]
+    # رجع أول max_results فقط
+    return filtered_results[:max_results]
+
+
 
 def get_place_details(place_id: str) -> dict:
     url = (
