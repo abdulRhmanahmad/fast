@@ -703,6 +703,7 @@ def chatbot(req: UserRequest):
             return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_audio"), done=False)
 
         # ========== الصوت ==========
+                # ========== الصوت ==========
         if step == "ask_audio":
              # تحديد الصوت
             if "قرآن" in user_msg or "قران" in user_msg:
@@ -727,6 +728,7 @@ def chatbot(req: UserRequest):
 هل ترغب بتأكيد الحجز؟
 """
     return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
+
 
 
         # ========== التأكيد ==========
