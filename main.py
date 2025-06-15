@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
-
+import time
 # ------------------------ PINECONE ------------------------
 from pinecone import Pinecone, ServerlessSpec
 CAR_TYPES_API_URL = "https://car-booking-api-64ov.onrender.com/api/codeTables/priceCategories/all"
@@ -411,6 +411,21 @@ def fetch_car_types():
     except Exception as e:
         print("خطأ في جلب أنواع السيارات:", e)
     return []
+
+
+car_types_cache = {
+    "data": [],
+    "timestamp": 0
+}
+
+def get_cached_car_types():
+    now = time.time()
+    # كاش 10 دقائق (600 ثانية)
+    if not car_types_cache["data"] or now - car_types_cache["timestamp"] > 600:
+        car_types_cache["data"] = fetch_car_types()
+        car_types_cache["timestamp"] = now
+    return car_types_cache["data"]
+    
 def get_place_details(place_id: str) -> dict:
     url = (
         "https://maps.googleapis.com/maps/api/place/details/json"
