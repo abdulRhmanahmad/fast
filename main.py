@@ -282,6 +282,26 @@ def expand_location_query(query: str) -> List[str]:
         expanded_queries.append(f"{query} دمشق")
         expanded_queries.append(f"{query}, دمشق")
     return list(set(expanded_queries))
+def get_distance_km(origin: str, destination: str) -> float:
+    """
+    احسب المسافة بالكيلومترات بين نقطتين باستخدام Google Distance Matrix API.
+    """
+    url = (
+        "https://maps.googleapis.com/maps/api/distancematrix/json"
+        f"?origins={origin}"
+        f"&destinations={destination}"
+        f"&mode=driving"
+        f"&language=ar"
+        f"&key={GOOGLE_MAPS_API_KEY}"
+    )
+    resp = requests.get(url)
+    data = resp.json()
+    if data["status"] == "OK":
+        row = data["rows"][0]["elements"][0]
+        if row["status"] == "OK":
+            distance_m = row["distance"]["value"]  # بالمتر
+            return round(distance_m / 1000, 2)
+    return 0.0  # لو صار أي خطأ
 
 # --------- بحث Pinecone: استخدمه بدل/مع smart_places_search حسب رغبتك -----------
 def search_places_with_pinecone(query):
@@ -684,23 +704,30 @@ def chatbot(req: UserRequest):
 
         # ========== الصوت ==========
         if step == "ask_audio":
-            if "قرآن" in user_msg or "قران" in user_msg:
-                sess["audio"] = "قرآن"
-            elif "موسيقى" in user_msg or "موسيقا" in user_msg or "أغاني" in user_msg:
-                sess["audio"] = "موسيقى"
-            else:
-                sess["audio"] = "صمت"
-            sess["step"] = "confirm_booking"
-            summary = f"""
-✔️ ملخص طلبك:
-📍 من: {remove_country(sess['pickup'])}
-🎯 إلى: {remove_country(sess['chosen_place']['address'])}
-⏰ الوقت: {sess['time']}
-🚗 نوع السيارة: {sess['car']}
-🎵 الصوت: {sess['audio']}
-هل تؤكد الحجز؟ (نعم/لا)
+    # تحديد الصوت
+    if "قرآن" in user_msg or "قران" in user_msg:
+        sess["audio"] = "قرآن"
+    elif "موسيقى" in user_msg or "موسيقا" in user_msg or "أغاني" in user_msg:
+        sess["audio"] = "موسيقى"
+    else:
+        sess["audio"] = "صمت"
+    sess["step"] = "confirm_booking"
+
+    # 🟢 هنا بنضيف حساب المسافة 👇
+    pickup_address = sess['pickup']
+    dest_address = sess['chosen_place']['address']
+    distance_km = get_distance_km(pickup_address, dest_address)
+    sess['distance_km'] = distance_km  # (اختياري)
+
+    summary = f"""
+🚕 ملخص طلبك:
+- من: {remove_country(pickup_address)}
+- إلى: {remove_country(dest_address)}
+- **المسافة التقريبية: {distance_km if distance_km else "غير متوفرة"} كم**
+هل ترغب بتأكيد الحجز؟
 """
-            return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
+    return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
+
 
         # ========== التأكيد ==========
         if step == "confirm_booking":
