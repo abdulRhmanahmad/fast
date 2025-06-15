@@ -704,23 +704,23 @@ def chatbot(req: UserRequest):
 
         # ========== الصوت ==========
         if step == "ask_audio":
-    # تحديد الصوت
-    if "قرآن" in user_msg or "قران" in user_msg:
-        sess["audio"] = "قرآن"
-    elif "موسيقى" in user_msg or "موسيقا" in user_msg or "أغاني" in user_msg:
-        sess["audio"] = "موسيقى"
-    else:
-        sess["audio"] = "صمت"
-    sess["step"] = "confirm_booking"
+             # تحديد الصوت
+            if "قرآن" in user_msg or "قران" in user_msg:
+                sess["audio"] = "قرآن"
+            elif "موسيقى" in user_msg or "موسيقا" in user_msg or "أغاني" in user_msg:
+                sess["audio"] = "موسيقى"
+            else:
+                sess["audio"] = "صمت"
+        sess["step"] = "confirm_booking"
 
-    # 🟢 هنا بنضيف حساب المسافة 👇
-    pickup_address = sess['pickup']
-    dest_address = sess['chosen_place']['address']
-    distance_km = get_distance_km(pickup_address, dest_address)
-    sess['distance_km'] = distance_km  # (اختياري)
+    
+        pickup_address = sess['pickup']
+        dest_address = sess['chosen_place']['address']
+        distance_km = get_distance_km(pickup_address, dest_address)
+        sess['distance_km'] = distance_km  # (اختياري)
 
-    summary = f"""
-🚕 ملخص طلبك:
+        summary = f"""
+ ملخص طلبك:
 - من: {remove_country(pickup_address)}
 - إلى: {remove_country(dest_address)}
 - **المسافة التقريبية: {distance_km if distance_km else "غير متوفرة"} كم**
