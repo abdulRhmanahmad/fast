@@ -40,11 +40,12 @@ pinecone_index = pc.Index(index_name)
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
 sessions: Dict[str, Dict[str, Any]] = {}
+places_cache = {}
 
 # -------------- الأماكن المعرفة محلياً -------------
 # لو عندك أماكن كثيرة، استوردها من ملف seed_places.py
 known_places_embedding = {
-"الجورة": "الجورة، دمشق، سوريا",
+    "الجورة": "الجورة، دمشق، سوريا",
     "العمارة الجوانية": "العمارة الجوانية، دمشق، سوريا",
     "باب توما": "باب توما، دمشق، سوريا",
     "القيمرية": "القيمرية، دمشق، سوريا",
@@ -194,8 +195,6 @@ def seed_places_to_pinecone():
             emb,
             {"name": name, "address": address}
         )])
-# شغلها مرة واحدة فقط (أول ما تنشئ الفهرس)، ثم علقها أو احذفها
-# seed_places_to_pinecone()
 
 # ============= Helpers & Core Functions =================
 
@@ -305,9 +304,13 @@ def search_places_with_pinecone(query):
     return []
 
 def smart_places_search(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
+    cache_key = f"{query.lower().strip()}"
+    if cache_key in places_cache:
+        return places_cache[cache_key]
     # جرب البحث في Pinecone أولاً
     pinecone_results = search_places_with_pinecone(query)
     if pinecone_results:
+        places_cache[cache_key] = pinecone_results
         return pinecone_results
     # باقي البحث المحلي أو Google Places API
     expanded_queries = expand_location_query(query)
@@ -339,6 +342,7 @@ def smart_places_search(query: str, user_lat: float, user_lng: float, max_result
                 "place_id": f"embed_{best_match}",
                 "is_local": True
             }]
+    places_cache[cache_key] = unique_results
     return unique_results[:max_results]
 
 def places_autocomplete(query: str, user_lat: float, user_lng: float, max_results=5) -> list:
@@ -363,8 +367,6 @@ def places_autocomplete(query: str, user_lat: float, user_lng: float, max_result
     filtered_results = [r for r in results if "دمشق" in r["description"]]
     # رجع أول max_results فقط
     return filtered_results[:max_results]
-
-
 
 def get_place_details(place_id: str) -> dict:
     url = (
@@ -402,8 +404,26 @@ def get_place_details_enhanced(place_id: str) -> dict:
     else:
         return get_place_details(place_id)
 
-# ============= دورة حياة البوت والتعامل مع الخطوات ==============
+def ask_gpt(message):
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "أجب بشكل ودود ومختصر دائماً."},
+            {"role": "user", "content": message}
+        ],
+        max_tokens=60,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
 
+def extract_time_from_text(user_msg):
+    m = re.search(r'بعد\s+(\d+)\s+دق(ي|ا)ق', user_msg)
+    if m:
+        mins = int(m.group(1))
+        return (datetime.now() + timedelta(minutes=mins)).strftime("%H:%M")
+    return user_msg
+
+# ================ API MODELS =================
 class UserRequest(BaseModel):
     sessionId: Optional[str] = None
     userInput: Optional[str] = None
@@ -415,32 +435,44 @@ class BotResponse(BaseModel):
     botMessage: str
     done: bool = False
 
+# ================ Messages =================
 step_messages = {
     "ask_destination": [
+        "أهلين وسهلين فيك 😊! وين بتحب نوصلك اليوم؟ 🚕",
+        "يا هلا! خبرني لوين رايح اليوم، وأرتبلك كل شي 👍",
+        "جاهز لمشوار جديد؟! قولي وين وجهتك اليوم 😊",
         "مرحباً! أنا يا هو، مساعدك الذكي للمشاوير 🚖.\nوين حابب تروح اليوم؟",
         "هلا فيك! حددلي وجهتك لو سمحت.",
         "أهلين، شو عنوان المكان الي رايح عليه؟",
         "يسعد مساك! خبرني وين وجهتك اليوم.",
         "وين بدك أوصلك اليوم؟"
     ],
+    "not_found": [
+        "ما قدرت لاقي العنوان 😅، ممكن تعطيني اسم أوضح أو تختار من الأماكن المقترحة تحت 👇",
+        "العنوان مو واضح، بتحب تعطيني اسم شارع أو منطقة؟ أو جرب تكتب بطريقة تانية ✍️"
+    ],
+    "choose_previous": [
+        "تحب أرجعك لمكانك السابق؟\n",
+        "هاي قائمة بأماكنك السابقة، بدك تروح لواحد منهم؟\n"
+    ],
     "ask_pickup": [
-        "من وين نوصلك؟ من موقعك الحالي ولا في نقطة ثانية؟",
-        "اختر نقطة الانطلاق: موقعك الحالي أو مكان آخر.",
+        "من وين نوصلك؟ من موقعك الحالي ولا في نقطة ثانية؟ 🗺️",
         "حابب أجيك ععنوانك الحالي ولا حابب تغير؟",
+        "اختر نقطة الانطلاق: موقعك الحالي أو مكان آخر.",
         "حددلي من وين حابب تبدأ الرحلة."
     ],
     "ask_time": [
-        "وقت الرحلة متى تفضّل؟ الآن ولا بتوقيت محدد؟",
+        "وقت الرحلة متى تفضّل؟ الآن ولا بتوقيت محدد؟ ⏱",
         "تحب ننطلق فوراً ولا تحدد وقت لاحق؟",
         "خبرني متى الوقت المناسب للانطلاق."
     ],
     "ask_car_type": [
-        "أي نوع سيارة بدك؟ عادية ولا VIP؟",
+        "أي نوع سيارة بدك؟ عادية ولا VIP؟ 🚗",
         "تفضّل سيارة عادية ولا بدك تجربة فاخرة (VIP)؟",
         "خبرني نوع السيارة: عادية أم VIP؟"
     ],
     "ask_audio": [
-        "تحب نسمع شي أثناء الرحلة؟ قرآن، موسيقى، أو تفضّل الصمت؟",
+        "تحب نسمع شي أثناء الرحلة؟ قرآن، موسيقى، أو تفضّل الصمت؟ 🎵",
         "اختر نوع الصوت: قرآن، موسيقى، أم بلا صوت.",
         "حابب نضيف لمسة موسيقية أو تحب الجو هادي؟"
     ],
@@ -448,24 +480,17 @@ step_messages = {
         "راجع ملخص الطلب وأكد إذا كل شي تمام 👇",
         "هذي تفاصيل رحلتك! إذا في شي مو واضح صححلي، أو أكد الحجز.",
         "قبل نأكد الحجز، شوف التفاصيل بالأسفل."
+    ],
+    "wait_loader": [
+        "لحظة صغيرة، عم دورلك عالعنوان 😊 ...",
+        "ثواني وعم لاقيلك المكان الأنسب 😄 ..."
     ]
 }
 
 def random_step_message(step):
-    msgs = step_messages.get(step, ["كيف أقدر أخدمك؟"])
-    return random.choice(msgs)
+    return random.choice(step_messages.get(step, ["كيف أقدر أخدمك؟"]))
 
-def ask_gpt(message):
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "أجب بشكل ودود ومختصر. إذا الموضوع خارج حجز التاكسي، جاوب بلطف ثم ذكر المستخدم أنه بإمكانه حجز مشوار."},
-            {"role": "user", "content": message}
-        ],
-        max_tokens=60,
-        temperature=0.7
-    )
-    return response.choices[0].message.content.strip()
+# ============= دورة حياة البوت والتعامل مع الخطوات ==============
 
 def is_out_of_booking_context(user_msg, step):
     general_words = [
@@ -519,6 +544,7 @@ def chatbot(req: UserRequest):
                     {"role": "assistant", "content": random_step_message("ask_destination")}
                 ],
                 "loc_txt": loc_txt,
+                "last_places": [],
                 "possible_places": None,
                 "chosen_place": None,
                 "possible_pickup_places": None,
@@ -527,12 +553,28 @@ def chatbot(req: UserRequest):
                 "car": None,
                 "audio": None
             }
-            return BotResponse(sessionId=sess_id, botMessage=random_step_message("ask_destination"))
+            # عرض الأماكن السابقة
+            last_places = sessions[sess_id]["last_places"]
+            if last_places:
+                prev_msg = random_step_message("choose_previous")
+                for i, p in enumerate(last_places):
+                    prev_msg += f"{i+1}. {remove_country(p)}\n"
+                prev_msg += "أكتب رقم المكان أو اسم جديد."
+                return BotResponse(sessionId=sess_id, botMessage=prev_msg)
+            else:
+                return BotResponse(sessionId=sess_id, botMessage=random_step_message("ask_destination"))
 
         sess = sessions[req.sessionId]
         user_msg = (req.userInput or "").strip()
         step = sess.get("step", "ask_destination")
+        last_places = sess.get("last_places", [])
 
+        # ========== إلغاء أو إعادة تشغيل ==========
+        if user_msg.lower() in ["إلغاء", "إلغاء الحجز", "ابدأ من جديد", "restart", "cancel"]:
+            del sessions[req.sessionId]
+            return BotResponse(sessionId="", botMessage="ولا يهمك! إذا حابب تبدأ حجز جديد خبرني وين بتروح 😊", done=True)
+
+        # ========== كلام خارج السياق ==========
         if is_out_of_booking_context(user_msg, step):
             gpt_reply = ask_gpt(user_msg)
             step_q = current_step_question(sess)
@@ -542,179 +584,109 @@ def chatbot(req: UserRequest):
                 done=False
             )
 
+        # ========== خطوة الوجهة + أماكن سابقة ==========
         if step == "ask_destination":
+            if user_msg.isdigit() and last_places:
+                idx = int(user_msg) - 1
+                if 0 <= idx < len(last_places):
+                    place_info = get_place_details_enhanced(f"embed_{last_places[idx].split('،')[0]}")
+                    sess["chosen_place"] = place_info
+                    sess["step"] = "ask_pickup"
+                    return BotResponse(sessionId=req.sessionId, botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])} 🚕\n{random_step_message('ask_pickup')}", done=False)
+
+            match_prev = difflib.get_close_matches(user_msg, [p.split("،")[0] for p in last_places], n=1, cutoff=0.8)
+            if match_prev:
+                return BotResponse(sessionId=req.sessionId, botMessage=f"على فكرة، هذا نفس المكان يلي رحت عليه قبل: {match_prev[0]} 😉\nأكيد تتابع ولا تكتب عنوان آخر؟", done=False)
+
             places = smart_places_search(user_msg, sess["lat"], sess["lng"])
             if not places:
-                return BotResponse(
-                    sessionId=req.sessionId,
-                    botMessage="لم أتمكن من العثور على هذا المكان. جرب مكان آخر أو أعد كتابة العنوان.\nمثال: 'الشعلان'، 'المزة'، 'ساحة الأمويين'",
-                    done=False
-                )
+                typo_msg = difflib.get_close_matches(user_msg, known_places_embedding.keys(), n=1, cutoff=0.6)
+                if typo_msg:
+                    return BotResponse(sessionId=req.sessionId, botMessage=f"يمكن قصدك: {typo_msg[0]}؟ أكتب 'نعم' للتأكيد أو جرب تكتب عنوان تاني. 😊", done=False)
+                return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("not_found")[0], done=False)
             if len(places) > 1:
                 sess["step"] = "choose_destination"
                 sess["possible_places"] = places
                 options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(places)])
-                return BotResponse(
-                    sessionId=req.sessionId,
-                    botMessage=f"وجدت أكثر من مكان:\n{options}\nاختر رقم أو اسم المكان المطلوب.",
-                    done=False
-                )
+                return BotResponse(sessionId=req.sessionId, botMessage=f"لقيت أكتر من مكان يشبه طلبك 👇\n{options}\nاختر رقم أو اسم المكان المطلوب.", done=False)
             else:
-                if places[0].get('is_local') or places[0].get('is_pinecone'):
-                    place_info = get_place_details_enhanced(places[0]['place_id'])
-                else:
-                    place_info = get_place_details(places[0]['place_id'])
+                place_info = get_place_details_enhanced(places[0]['place_id'])
                 sess["chosen_place"] = place_info
                 sess["step"] = "ask_pickup"
-                return BotResponse(
-                    sessionId=req.sessionId,
-                    botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}\n{random_step_message('ask_pickup')}",
-                    done=False
-                )
+                return BotResponse(sessionId=req.sessionId, botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])} 🚕\n{random_step_message('ask_pickup')}", done=False)
 
+        # ========== اختيار من قائمة ==========
         if step == "choose_destination":
             places = sess.get("possible_places", [])
-            user_reply = user_msg.strip().lower()
-            found = False
-            try:
-                idx = int(user_reply) - 1
+            if user_msg.isdigit():
+                idx = int(user_msg) - 1
                 if 0 <= idx < len(places):
-                    if places[idx].get('is_local') or places[idx].get('is_pinecone'):
-                        place_info = get_place_details_enhanced(places[idx]['place_id'])
-                    else:
-                        place_info = get_place_details(places[idx]['place_id'])
+                    place_info = get_place_details_enhanced(places[idx]['place_id'])
                     sess["chosen_place"] = place_info
                     sess["step"] = "ask_pickup"
-                    found = True
-            except:
-                pass
-            if not found:
-                new_places = smart_places_search(user_msg, sess["lat"], sess["lng"])
-                if new_places:
-                    if len(new_places) == 1:
-                        if new_places[0].get('is_local') or new_places[0].get('is_pinecone'):
-                            place_info = get_place_details_enhanced(new_places[0]['place_id'])
-                        else:
-                            place_info = get_place_details(new_places[0]['place_id'])
-                        sess["chosen_place"] = place_info
-                        sess["step"] = "ask_pickup"
-                        return BotResponse(
-                            sessionId=req.sessionId,
-                            botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])}\n{random_step_message('ask_pickup')}",
-                            done=False
-                        )
-                    else:
-                        sess["possible_places"] = new_places
-                        options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(new_places)])
-                        return BotResponse(
-                            sessionId=req.sessionId,
-                            botMessage=f"وجدت أكثر من مكان:\n{options}\nاختر رقم أو اسم المكان المطلوب.",
-                            done=False
-                        )
-                else:
-                    return BotResponse(sessionId=req.sessionId, botMessage="ما لقيت المكان، جرب تكتب عنوان أوضح أو مختلف.", done=False)
-            else:
-                return BotResponse(
-                    sessionId=req.sessionId,
-                    botMessage=f"✔️ تم اختيار الوجهة: {remove_country(sess['chosen_place']['address'])}\n{random_step_message('ask_pickup')}",
-                    done=False
-                )
+                    return BotResponse(sessionId=req.sessionId, botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])} 🚕\n{random_step_message('ask_pickup')}", done=False)
+            typo_msg = difflib.get_close_matches(user_msg, [p['description'].split("،")[0] for p in places], n=1, cutoff=0.6)
+            if typo_msg:
+                return BotResponse(sessionId=req.sessionId, botMessage=f"يمكن قصدك: {typo_msg[0]}؟ أكتب 'نعم' للتأكيد أو جرب تكتب عنوان تاني. 😊", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("not_found")[0], done=False)
 
+        # ========== نقطة الانطلاق ==========
         if step == "ask_pickup":
-            user_reply = user_msg.strip().lower()
-            if user_reply in ["موقعي", "موقعي الحالي", "الموقع الحالي"]:
+            if user_msg in ["موقعي", "موقعي الحالي", "الموقع الحالي"]:
                 sess["pickup"] = sess["loc_txt"]
                 sess["step"] = "ask_time"
                 return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
             else:
                 places = smart_places_search(user_msg, sess["lat"], sess["lng"])
                 if not places:
-                    return BotResponse(
-                        sessionId=req.sessionId,
-                        botMessage="لم أتمكن من العثور على هذا المكان كنقطة انطلاق. جرب عنوان آخر.",
-                        done=False
-                    )
+                    return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("not_found")[1], done=False)
                 if len(places) > 1:
                     sess["step"] = "choose_pickup"
                     sess["possible_pickup_places"] = places
                     options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(places)])
-                    return BotResponse(
-                        sessionId=req.sessionId,
-                        botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nاختر رقم أو اسم المكان.",
-                        done=False
-                    )
+                    return BotResponse(sessionId=req.sessionId, botMessage=f"لقيت أكتر من مكان كنقطة انطلاق 👇\n{options}\nاختر رقم أو اسم المكان.", done=False)
                 else:
-                    if places[0].get('is_local') or places[0].get('is_pinecone'):
-                        place_info = get_place_details_enhanced(places[0]['place_id'])
-                    else:
-                        place_info = get_place_details(places[0]['place_id'])
+                    place_info = get_place_details_enhanced(places[0]['place_id'])
                     sess["pickup"] = place_info['address']
                     sess["step"] = "ask_time"
                     return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
 
+        # ========== اختيار نقطة الانطلاق ==========
         if step == "choose_pickup":
             places = sess.get("possible_pickup_places", [])
-            user_reply = user_msg.strip().lower()
-            found = False
-            try:
-                idx = int(user_reply) - 1
+            if user_msg.isdigit():
+                idx = int(user_msg) - 1
                 if 0 <= idx < len(places):
-                    if places[idx].get('is_local') or places[idx].get('is_pinecone'):
-                        place_info = get_place_details_enhanced(places[idx]['place_id'])
-                    else:
-                        place_info = get_place_details(places[idx]['place_id'])
+                    place_info = get_place_details_enhanced(places[idx]['place_id'])
                     sess["pickup"] = place_info['address']
                     sess["step"] = "ask_time"
-                    found = True
-            except:
-                pass
-            if not found:
-                new_places = smart_places_search(user_msg, sess["lat"], sess["lng"])
-                if new_places:
-                    if len(new_places) == 1:
-                        if new_places[0].get('is_local') or new_places[0].get('is_pinecone'):
-                            place_info = get_place_details_enhanced(new_places[0]['place_id'])
-                        else:
-                            place_info = get_place_details(new_places[0]['place_id'])
-                        sess["pickup"] = place_info['address']
-                        sess["step"] = "ask_time"
-                        return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
-                    else:
-                        sess["possible_pickup_places"] = new_places
-                        options = "\n".join([f"{i+1}. {remove_country(p['description'])}" for i, p in enumerate(new_places)])
-                        return BotResponse(
-                            sessionId=req.sessionId,
-                            botMessage=f"وجدت أكثر من مكان كنقطة انطلاق:\n{options}\nاختر رقم أو اسم المكان.",
-                            done=False
-                        )
-                else:
-                    return BotResponse(sessionId=req.sessionId, botMessage="ما لقيت المكان كنقطة انطلاق. جرب عنوان أوضح أو مختلف.", done=False)
-            else:
-                return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
+                    return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
+            typo_msg = difflib.get_close_matches(user_msg, [p['description'].split("،")[0] for p in places], n=1, cutoff=0.6)
+            if typo_msg:
+                return BotResponse(sessionId=req.sessionId, botMessage=f"يمكن قصدك: {typo_msg[0]}؟ أكتب 'نعم' للتأكيد أو جرب تكتب عنوان تاني. 😊", done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("not_found")[1], done=False)
 
+        # ========== وقت الرحلة ==========
         if step == "ask_time":
-            user_reply = user_msg.strip().lower()
-            if user_reply in ["الآن", "حالا", "حاضر", "فوري"]:
-                sess["time"] = "الآن"
-            else:
-                sess["time"] = user_msg.strip()
+            parsed_time = extract_time_from_text(user_msg)
+            sess["time"] = parsed_time
             sess["step"] = "ask_car_type"
             return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_car_type"), done=False)
 
+        # ========== نوع السيارة ==========
         if step == "ask_car_type":
-            user_reply = user_msg.strip().lower()
-            if "vip" in user_reply or "في آي بي" in user_reply or "فاخرة" in user_reply:
+            if "vip" in user_msg.lower() or "في آي بي" in user_msg.lower() or "فاخرة" in user_msg.lower():
                 sess["car"] = "VIP"
             else:
                 sess["car"] = "عادية"
             sess["step"] = "ask_audio"
             return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_audio"), done=False)
 
+        # ========== الصوت ==========
         if step == "ask_audio":
-            user_reply = user_msg.strip().lower()
-            if "قرآن" in user_reply or "قران" in user_reply:
+            if "قرآن" in user_msg or "قران" in user_msg:
                 sess["audio"] = "قرآن"
-            elif "موسيقى" in user_reply or "موسيقا" in user_reply or "أغاني" in user_reply:
+            elif "موسيقى" in user_msg or "موسيقا" in user_msg or "أغاني" in user_msg:
                 sess["audio"] = "موسيقى"
             else:
                 sess["audio"] = "صمت"
@@ -726,31 +698,33 @@ def chatbot(req: UserRequest):
 ⏰ الوقت: {sess['time']}
 🚗 نوع السيارة: {sess['car']}
 🎵 الصوت: {sess['audio']}
-
 هل تؤكد الحجز؟ (نعم/لا)
 """
             return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
 
+        # ========== التأكيد ==========
         if step == "confirm_booking":
-            user_reply = user_msg.strip().lower()
-            if user_reply in ["نعم", "موافق", "أكد", "تأكيد", "yes", "ok"]:
+            if user_msg in ["نعم", "موافق", "أكد", "تأكيد", "yes", "ok"]:
                 booking_id = random.randint(10000, 99999)
-                success_msg = f"""
+                last_places = [sess["chosen_place"]["address"]] + [
+                    p for p in sess.get('last_places', []) if p != sess["chosen_place"]["address"]
+                ]
+                sess["last_places"] = last_places[:3]
+                msg = f"""
 🎉 تم تأكيد حجزك بنجاح!
 رقم الحجز: {booking_id}
-📱 ستصلك رسالة تأكيد قريباً
-🚗 السائق في الطريق إليك
+🚗 السائق في الطريق إليك!
 ⏱️ الوقت المتوقع: 5-10 دقائق
 
-شكراً لاستخدامك خدمة يا هو! 🚖
+لو بدك حجز جديد خبرني وين بتروح 😉
 """
                 del sessions[req.sessionId]
-                return BotResponse(sessionId=req.sessionId, botMessage=success_msg, done=True)
+                return BotResponse(sessionId=req.sessionId, botMessage=msg, done=True)
             else:
-                return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز. هل تود بدء حجز جديد؟", done=True)
+                return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز. إذا حابب تبدأ من جديد خبرني 😊", done=True)
 
-        return BotResponse(sessionId=req.sessionId, botMessage="عذراً، حدث خطأ. حاول مرة أخرى.", done=False)
+        # ========== خطأ عام ==========
+        return BotResponse(sessionId=req.sessionId, botMessage="عذراً، حدث خطأ غير متوقع 😅 جرب من جديد.", done=False)
     except Exception as e:
-        print('خطأ في السيرفر:', e)
-        return BotResponse(sessionId=req.sessionId if req.sessionId else '', botMessage="حصل خطأ بالسيرفر. جرب بعد قليل.", done=True)
-
+        print("خطأ:", e)
+        return BotResponse(sessionId=req.sessionId if req.sessionId else '', botMessage="حصل خطأ بالسيرفر 😔، حاول بعد قليل.", done=True)
