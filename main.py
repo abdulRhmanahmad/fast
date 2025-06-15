@@ -283,15 +283,18 @@ def expand_location_query(query: str) -> List[str]:
         expanded_queries.append(f"{query}, دمشق")
     return list(set(expanded_queries))
 def get_distance_km(origin: str, destination: str) -> float:
-    # 1. حاول تحويل العنوان لإحداثيات
     def get_latlng(address):
         geo = geocode(address)
+        print("geocode result for", address, "=>", geo)
         if geo:
             return f"{geo['lat']},{geo['lng']}"
         return address  # fallback للنص إذا فشل
-    
+
     origin_latlng = get_latlng(origin)
     destination_latlng = get_latlng(destination)
+
+    print("origin_latlng:", origin_latlng)
+    print("destination_latlng:", destination_latlng)
 
     url = (
         "https://maps.googleapis.com/maps/api/distancematrix/json"
@@ -302,10 +305,9 @@ def get_distance_km(origin: str, destination: str) -> float:
         f"&language=ar"
         f"&key={GOOGLE_MAPS_API_KEY}"
     )
+    print("distance url:", url)
     resp = requests.get(url)
     data = resp.json()
-
-    # طبع النتيجة لوج للتأكد إذا بدك
     print("DistanceMatrixAPI:", data)
 
     if data["status"] == "OK":
@@ -314,6 +316,7 @@ def get_distance_km(origin: str, destination: str) -> float:
             distance_m = row["distance"]["value"]
             return round(distance_m / 1000, 2)
     return 0.0
+
 
 
 # --------- بحث Pinecone: استخدمه بدل/مع smart_places_search حسب رغبتك -----------
