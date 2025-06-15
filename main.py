@@ -283,25 +283,38 @@ def expand_location_query(query: str) -> List[str]:
         expanded_queries.append(f"{query}, دمشق")
     return list(set(expanded_queries))
 def get_distance_km(origin: str, destination: str) -> float:
-    """
-    احسب المسافة بالكيلومترات بين نقطتين باستخدام Google Distance Matrix API.
-    """
+    # 1. حاول تحويل العنوان لإحداثيات
+    def get_latlng(address):
+        geo = geocode(address)
+        if geo:
+            return f"{geo['lat']},{geo['lng']}"
+        return address  # fallback للنص إذا فشل
+    
+    origin_latlng = get_latlng(origin)
+    destination_latlng = get_latlng(destination)
+
     url = (
         "https://maps.googleapis.com/maps/api/distancematrix/json"
-        f"?origins={origin}"
-        f"&destinations={destination}"
+        f"?origins={origin_latlng}"
+        f"&destinations={destination_latlng}"
         f"&mode=driving"
+        f"&region=SY"
         f"&language=ar"
         f"&key={GOOGLE_MAPS_API_KEY}"
     )
     resp = requests.get(url)
     data = resp.json()
+
+    # طبع النتيجة لوج للتأكد إذا بدك
+    print("DistanceMatrixAPI:", data)
+
     if data["status"] == "OK":
         row = data["rows"][0]["elements"][0]
         if row["status"] == "OK":
-            distance_m = row["distance"]["value"]  # بالمتر
+            distance_m = row["distance"]["value"]
             return round(distance_m / 1000, 2)
-    return 0.0  # لو صار أي خطأ
+    return 0.0
+
 
 # --------- بحث Pinecone: استخدمه بدل/مع smart_places_search حسب رغبتك -----------
 def search_places_with_pinecone(query):
