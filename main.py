@@ -285,37 +285,32 @@ def expand_location_query(query: str) -> List[str]:
 def get_distance_km(origin: str, destination: str) -> float:
     def get_latlng(address):
         geo = geocode(address)
-        print("geocode result for", address, "=>", geo)
         if geo:
             return f"{geo['lat']},{geo['lng']}"
-        return address  # fallback للنص إذا فشل
-
+        return address  # fallback
+    
     origin_latlng = get_latlng(origin)
     destination_latlng = get_latlng(destination)
-
-    print("origin_latlng:", origin_latlng)
-    print("destination_latlng:", destination_latlng)
-
+    
     url = (
-        "https://maps.googleapis.com/maps/api/distancematrix/json"
-        f"?origins={origin_latlng}"
-        f"&destinations={destination_latlng}"
+        "https://maps.googleapis.com/maps/api/directions/json"
+        f"?origin={origin_latlng}"
+        f"&destination={destination_latlng}"
         f"&mode=driving"
         f"&region=SY"
         f"&language=ar"
         f"&key={GOOGLE_MAPS_API_KEY}"
     )
-    print("distance url:", url)
     resp = requests.get(url)
     data = resp.json()
-    print("DistanceMatrixAPI:", data)
-
-    if data["status"] == "OK":
-        row = data["rows"][0]["elements"][0]
-        if row["status"] == "OK":
-            distance_m = row["distance"]["value"]
-            return round(distance_m / 1000, 2)
+    # اطبع الداتا عند التجربة للتصحيح إن لزم
+    # print(data)
+    if data.get("status") == "OK" and data.get("routes"):
+        leg = data["routes"][0]["legs"][0]
+        distance_m = leg["distance"]["value"]
+        return round(distance_m / 1000, 2)
     return 0.0
+
 
 
 
