@@ -13,6 +13,7 @@ from openai import OpenAI
 
 # ------------------------ PINECONE ------------------------
 from pinecone import Pinecone, ServerlessSpec
+CAR_TYPES_API_URL = "https://car-booking-api-64ov.onrender.com/api/codeTables/priceCategories/all"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
@@ -398,7 +399,18 @@ def places_autocomplete(query: str, user_lat: float, user_lng: float, max_result
     filtered_results = [r for r in results if "دمشق" in r["description"]]
     # رجع أول max_results فقط
     return filtered_results[:max_results]
-
+def fetch_car_types():
+    try:
+        resp = requests.get(CAR_TYPES_API_URL, timeout=5)
+        data = resp.json()
+        # غالباً البيانات المطلوبة داخل "data"
+        if isinstance(data, dict) and "data" in data:
+            return data["data"]
+        if isinstance(data, list):
+            return data
+    except Exception as e:
+        print("خطأ في جلب أنواع السيارات:", e)
+    return []
 def get_place_details(place_id: str) -> dict:
     url = (
         "https://maps.googleapis.com/maps/api/place/details/json"
@@ -706,12 +718,32 @@ def chatbot(req: UserRequest):
 
         # ========== نوع السيارة ==========
         if step == "ask_car_type":
-            if "vip" in user_msg.lower() or "في آي بي" in user_msg.lower() or "فاخرة" in user_msg.lower():
-                sess["car"] = "VIP"
-            else:
+            car_types = get_cached_car_types()
+            if not car_types:
                 sess["car"] = "عادية"
-            sess["step"] = "ask_audio"
-            return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_audio"), done=False)
+                sess["step"] = "ask_audio"
+                return BotResponse(sessionId=req.sessionId, botMessage="ما قدرت أجيب أنواع السيارات حالياً. نكمل بسيارة عادية.", done=False)
+
+            options = "\n".join([f"{i+1}. {ct.get('name', ct.get('arName', 'نوع غير معروف'))}" for i, ct in enumerate(car_types)])
+            sess["car_types"] = car_types
+            sess["step"] = "choose_car_type"
+            return BotResponse(
+                sessionId=req.sessionId,
+                botMessage=f"اختر نوع السيارة اللي يناسبك:\n{options}\n(أرسل رقم النوع)",
+                done=False
+            )
+        if step == "choose_car_type":
+            car_types = sess.get("car_types", [])
+            if user_msg.isdigit():
+                idx = int(user_msg) - 1
+                if 0 <= idx < len(car_types):
+                    sess["car"] = car_types[idx].get("name", car_types[idx].get("arName", "غير معروف"))
+                    sess["car_id"] = car_types[idx].get("id")
+                    sess["step"] = "ask_audio"
+                    return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_audio"), done=False)
+            return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم من القائمة أعلاه.", done=False)
+    
+         
 
         # ========== الصوت ==========
                 # ========== الصوت ==========
