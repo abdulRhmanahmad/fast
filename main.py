@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
 import time
+from datetime import datetime, timedelta
 # ------------------------ PINECONE ------------------------
 from pinecone import Pinecone, ServerlessSpec
 CAR_TYPES_API_URL = "https://car-booking-api-64ov.onrender.com/api/codeTables/priceCategories/all"
@@ -39,8 +40,14 @@ pinecone_index = pc.Index(index_name)
 
 # ------------------- OPENAI & FASTAPI ---------------------
 client = OpenAI(api_key=OPENAI_API_KEY)
+
 app = FastAPI()
+@app.get("/")
+def root():
+    return {"status": "ok", "msg": "Taxi bot is running"}
+
 sessions: Dict[str, Dict[str, Any]] = {}
+
 places_cache = {}
 
 # -------------- الأماكن المعرفة محلياً -------------
@@ -758,11 +765,8 @@ def chatbot(req: UserRequest):
                     return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_audio"), done=False)
             return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم من القائمة أعلاه.", done=False)
     
-         
+        
 
-        # ========== الصوت ==========
-                # ========== الصوت ==========
-                # ========== الصوت ==========
         if step == "ask_audio":
             # تحديد الصوت
             if "قرآن" in user_msg or "قران" in user_msg:
