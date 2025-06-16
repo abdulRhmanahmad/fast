@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta
 # ------------------------ PINECONE ------------------------
 from pinecone import Pinecone, ServerlessSpec
-
+TRIP_CREATE_API_URL = "https://car-booking-api-64ov.onrender.com/api/travel/request/create"
 CAR_TYPES_API_URL = "https://car-booking-api-64ov.onrender.com/api/codeTables/priceCategories/all"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -82,6 +82,18 @@ def seed_places_to_pinecone():
         )])
 
 # ============= Helpers & Core Functions =================
+def calculate_estimated_price(distance_km, car_type_id):
+    car_types = get_cached_car_types()
+    car_type = next((c for c in car_types if str(c["Id"]) == str(car_type_id)), None)
+    if not car_type:
+        return 0
+    min_price = float(car_type.get("Min_Price", 0))
+    # جدول الأسعار التفصيلي
+    for price_cat in car_type.get("A_Price_Catg", []):
+        if price_cat["From_Dis"] <= distance_km < price_cat["To_Dis"]:
+            return max(min_price, float(price_cat["Price"]) * distance_km)
+    # لو مافي رينج مناسب استعمل الحد الأدنى
+    return min_price
 
 def get_embedding(text: str) -> list:
     response = client.embeddings.create(model="text-embedding-3-small", input=[text])
@@ -294,7 +306,6 @@ car_types_cache = {
     "data": [],
     "timestamp": 0
 }
-
 def get_cached_car_types():
     now = time.time()
     if not car_types_cache["data"] or now - car_types_cache["timestamp"] > 600:
@@ -525,6 +536,7 @@ def chatbot(req: UserRequest):
                 if 0 <= idx < len(last_places):
                     place_info = get_place_details_enhanced(f"embed_{last_places[idx].split('،')[0]}")
                     sess["chosen_place"] = place_info
+                    
                     sess["step"] = "ask_pickup"
                     return BotResponse(sessionId=req.sessionId, botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])} 🚕\n{random_step_message('ask_pickup')}", done=False)
 
@@ -546,6 +558,8 @@ def chatbot(req: UserRequest):
             else:
                 place_info = get_place_details_enhanced(places[0]['place_id'])
                 sess["chosen_place"] = place_info
+                sess["to_lat"] = place_info.get("lat", 0)
+                sess["to_lng"] = place_info.get("lng", 0)
                 sess["step"] = "ask_pickup"
                 return BotResponse(sessionId=req.sessionId, botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])} 🚕\n{random_step_message('ask_pickup')}", done=False)
 
@@ -557,6 +571,8 @@ def chatbot(req: UserRequest):
                 if 0 <= idx < len(places):
                     place_info = get_place_details_enhanced(places[idx]['place_id'])
                     sess["chosen_place"] = place_info
+                    sess["to_lat"] = place_info.get("lat", 0)
+                    sess["to_lng"] = place_info.get("lng", 0)
                     sess["step"] = "ask_pickup"
                     return BotResponse(sessionId=req.sessionId, botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])} 🚕\n{random_step_message('ask_pickup')}", done=False)
             typo_msg = difflib.get_close_matches(user_msg, [p['description'].split("،")[0] for p in places], n=1, cutoff=0.6)
@@ -566,9 +582,13 @@ def chatbot(req: UserRequest):
 
         # ========== نقطة الانطلاق ==========
         if step == "ask_pickup":
-            if user_msg in ["موقعي", "موقعي الحالي", "الموقع الحالي"]:
+            if user_msg in ["موقعي", "موقعي", "موقعي الحالي", "الموقع الحالي"]:
                 sess["pickup"] = sess["loc_txt"]
+                sess["pickup_lat"] = sess["lat"]
+                sess["pickup_lng"] = sess["lng"]
                 sess["step"] = "ask_time"
+
+            
                 return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
             else:
                 places = smart_places_search(user_msg, sess["lat"], sess["lng"])
@@ -582,6 +602,10 @@ def chatbot(req: UserRequest):
                 else:
                     place_info = get_place_details_enhanced(places[0]['place_id'])
                     sess["pickup"] = place_info['address']
+                    
+                    sess["pickup_lat"] = place_info.get("lat", 0)
+                    sess["pickup_lng"] = place_info.get("lng", 0)
+
                     sess["step"] = "ask_time"
                     return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
 
@@ -593,6 +617,8 @@ def chatbot(req: UserRequest):
                 if 0 <= idx < len(places):
                     place_info = get_place_details_enhanced(places[idx]['place_id'])
                     sess["pickup"] = place_info['address']
+                    sess["pickup_lat"] = place_info.get("lat", 0)
+                    sess["pickup_lng"] = place_info.get("lng", 0)
                     sess["step"] = "ask_time"
                     return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_time"), done=False)
             typo_msg = difflib.get_close_matches(user_msg, [p['description'].split("،")[0] for p in places], n=1, cutoff=0.6)
@@ -615,7 +641,9 @@ def chatbot(req: UserRequest):
                 sess["step"] = "ask_audio"
                 return BotResponse(sessionId=req.sessionId, botMessage="ما قدرت أجيب أنواع السيارات حالياً. نكمل بسيارة عادية.", done=False)
 
-            options = "\n".join([f"{i+1}. {ct.get('name', ct.get('arName', 'نوع غير معروف'))}" for i, ct in enumerate(car_types)])
+           
+            options = "\n".join([f"{i+1}. {ct.get('Ar_Name', 'نوع غير معروف')}" for i, ct in enumerate(car_types)])
+
             sess["car_types"] = car_types
             sess["step"] = "choose_car_type"
             return BotResponse(
@@ -628,8 +656,11 @@ def chatbot(req: UserRequest):
             if user_msg.isdigit():
                 idx = int(user_msg) - 1
                 if 0 <= idx < len(car_types):
-                    sess["car"] = car_types[idx].get("name", car_types[idx].get("arName", "غير معروف"))
-                    sess["car_id"] = car_types[idx].get("id")
+                    
+
+                    sess["car"] = car_types[idx].get("Ar_Name", "غير معروف")
+                    sess["car_id"] = car_types[idx].get("Id")
+
                     sess["step"] = "ask_audio"
                     return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("ask_audio"), done=False)
             return BotResponse(sessionId=req.sessionId, botMessage="يرجى اختيار رقم من القائمة أعلاه.", done=False)
@@ -648,42 +679,75 @@ def chatbot(req: UserRequest):
             dest_address = sess['chosen_place']['address']
             distance_km = get_distance_km(pickup_address, dest_address)
             sess['distance_km'] = distance_km  # (اختياري)
+            car_id = sess.get('car_id', 1)
+            estimated_price = calculate_estimated_price(distance_km, car_id)
+            sess['estimated_price'] = estimated_price
 
             summary = f"""
- ملخص طلبك:
+ملخص طلبك:
 - من: {remove_country(pickup_address)}
 - إلى: {remove_country(dest_address)}
-- **المسافة التقريبية: {distance_km if distance_km else "غير متوفرة"} كم**
+- المسافة التقريبية: {distance_km if distance_km else "غير متوفرة"} كم
+- نوع السيارة: {sess.get('car')}
+- السعر التقديري: {int(estimated_price)} ل.س
 هل ترغب بتأكيد الحجز؟
 """
-            return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
 
+
+            return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
+        
         # ========== التأكيد ==========
         if step == "confirm_booking":
             if user_msg in ["نعم", "موافق", "أكد", "تأكيد", "yes", "ok"]:
-                booking_id = random.randint(10000, 99999)
-                last_places = [sess["chosen_place"]["address"]] + [
-                    p for p in sess.get('last_places', []) if p != sess["chosen_place"]["address"]
-                ]
-                sess["last_places"] = last_places[:3]
+                pickup_address = sess['pickup']
+                dest_address = sess['chosen_place']['address']
+                distance_km = sess.get('distance_km', 0)
+                estimated_price = sess.get('estimated_price', 0)
+                car_id = sess.get('car_id', 1)
+                estimated_duration = int(distance_km * 4)  # أو احسبها من API المسافة والزمن
+                estimated_distance = int(distance_km * 1000)
+
+                from_lat = sess.get('pickup_lat', 0)      # إذا تقدر خزّنها من قبل
+                from_lng = sess.get('pickup_lng', 0)
+                to_lat = sess.get('to_lat', 0)
+                to_lng = sess.get('to_lng', 0)
+                payload = {
+                    "From_Location": remove_country(pickup_address),
+                    "To_Location": remove_country(dest_address),
+                    "From_Lat": from_lat,
+                    "From_Lng": from_lng,
+                    "To_Lat": to_lat,
+                    "To_Lng": to_lng,
+                    "Catg_Id": int(car_id),
+                    "Pref_Music": sess.get("audio", ""),
+                    "Estimated_Price": float(estimated_price),
+                    "Estimated_Duration": estimated_duration,
+                    "Estimated_Distance": estimated_distance,
+                    "Start_at": None,
+                    "Type_Id": 4,
+                    "Rem": "حجز من الشات بوت"
+                }
+                try:
+                    api_response = requests.post(TRIP_CREATE_API_URL, json=payload, timeout=10)
+                    resp_json = api_response.json()
+                except Exception as e:
+                    resp_json = {"error": str(e)}
                 msg = f"""
 🎉 تم تأكيد حجزك بنجاح!
-رقم الحجز: {booking_id}
 🚗 السائق في الطريق إليك!
 ⏱️ الوقت المتوقع: 5-10 دقائق
+
+بيانات الرحلة (API): {resp_json}
 
 لو بدك حجز جديد خبرني وين بتروح 😉
 """
                 del sessions[req.sessionId]
                 return BotResponse(sessionId=req.sessionId, botMessage=msg, done=True)
             else:
-                return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز. إذا حابب تبدأ من جديد خبرني 😊", done=True)
+                 return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز. إذا حابب تبدأ من جديد خبرني 😊", done=True)
 
-        # ========== خطأ عام ==========
-        return BotResponse(sessionId=req.sessionId, botMessage="عذراً، حدث خطأ غير متوقع 😅 جرب من جديد.", done=False)
-    except Exception as e:
-        print("خطأ:", e)
-        return BotResponse(sessionId=req.sessionId if req.sessionId else '', botMessage="حصل خطأ بالسيرفر 😔، حاول بعد قليل.", done=True)
+
+        
 
 # ========== تشغيل السيرفر محلياً لو أردت ==========
 if __name__ == "__main__":
