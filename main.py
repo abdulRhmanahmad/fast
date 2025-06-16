@@ -14,6 +14,8 @@ import time
 from datetime import datetime, timedelta
 # ------------------------ PINECONE ------------------------
 from pinecone import Pinecone, ServerlessSpec
+CAR_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIyIiwicm9sZSI6ImN1c3RvbWVyIiwiaWF0IjoxNzUwMDgyMjAxLCJqdGkiOiIzNTQ4ZDkxMjAwNTg1MzFlZTAyMjIyMjk2NjAyMDI1YyIsImV4cCI6MTc2NTYzNDIwMX0.dI-KiSP5nd_JmOgpqIx3rOnUDJnBlZkfGXeWpxfmZNQ"
+
 TRIP_CREATE_API_URL = "https://car-booking-api-64ov.onrender.com/api/travel/request/create"
 CAR_TYPES_API_URL = "https://car-booking-api-64ov.onrender.com/api/codeTables/priceCategories/all"
 
@@ -21,6 +23,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
 PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1")
+ 
 
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index_name = "places-index"
@@ -292,7 +295,13 @@ def places_autocomplete(query: str, user_lat: float, user_lng: float, max_result
 # ---------- جلب أنواع السيارات مع كاش ----------
 def fetch_car_types():
     try:
-        resp = requests.get(CAR_TYPES_API_URL, timeout=5)
+        headers = {
+    "Authorization": f"Bearer {CAR_API_TOKEN}",
+    "Content-Type": "application/json"
+  }
+
+        resp = requests.get(CAR_TYPES_API_URL, headers=headers, timeout=5)
+
         data = resp.json()
         if isinstance(data, dict) and "data" in data:
             return data["data"]
@@ -730,7 +739,12 @@ def chatbot(req: UserRequest):
                     "Rem": "حجز من الشات بوت"
                 }
                 try:
-                    api_response = requests.post(TRIP_CREATE_API_URL, json=payload, timeout=10)
+                    headers = {
+    "Authorization": f"Bearer {CAR_API_TOKEN}",
+    "Content-Type": "application/json"
+}
+                    api_response = requests.post(TRIP_CREATE_API_URL, json=payload, headers=headers, timeout=10)
+
                     resp_json = api_response.json()
                 except Exception as e:
                     resp_json = {"error": str(e)}
