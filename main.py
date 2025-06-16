@@ -472,6 +472,7 @@ ASSISTANT_PROMPT = """
 """
 
 # ============= FastAPI Endpoint ==============
+
 @app.post("/chatbot", response_model=BotResponse)
 def chatbot(req: UserRequest):
     try:
@@ -577,6 +578,7 @@ def chatbot(req: UserRequest):
                     return BotResponse(sessionId=req.sessionId, botMessage=f"✔️ تم اختيار الوجهة: {remove_country(place_info['address'])} 🚕\n{random_step_message('ask_pickup')}", done=False)
             typo_msg = difflib.get_close_matches(user_msg, [p['description'].split("،")[0] for p in places], n=1, cutoff=0.6)
             if typo_msg:
+                
                 return BotResponse(sessionId=req.sessionId, botMessage=f"يمكن قصدك: {typo_msg[0]}؟ أكتب 'نعم' للتأكيد أو جرب تكتب عنوان تاني. 😊", done=False)
             return BotResponse(sessionId=req.sessionId, botMessage=random_step_message("not_found")[0], done=False)
 
@@ -693,7 +695,7 @@ def chatbot(req: UserRequest):
 هل ترغب بتأكيد الحجز؟
 """
 
-
+    
             return BotResponse(sessionId=req.sessionId, botMessage=summary, done=False)
         
         # ========== التأكيد ==========
@@ -745,6 +747,12 @@ def chatbot(req: UserRequest):
                 return BotResponse(sessionId=req.sessionId, botMessage=msg, done=True)
             else:
                  return BotResponse(sessionId=req.sessionId, botMessage="تم إلغاء الحجز. إذا حابب تبدأ من جديد خبرني 😊", done=True)
+    except Exception as e:
+        return BotResponse(
+        sessionId = getattr(req, "sessionId", ""),
+        botMessage = f"⚠️ حصل خطأ غير متوقع أثناء معالجة الطلب: {str(e)}",
+        done = True
+    )
 
 
         
